@@ -10,7 +10,7 @@
 
 ## 使用
 
-直接将 `EventEmit` 命名空间代码复制到项目中，例如保存为 `EventEmit.ts`，然后按需导入：
+直接将 `EventEmit.ts` 整代码复制到项目中：
 
 ```typescript
 import EventEmit from "./EventEmit";
