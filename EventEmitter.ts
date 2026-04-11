@@ -1,4 +1,4 @@
-namespace EventEmit {
+namespace EventEmitter {
 	/** 回调信息存储结构，用于内部维护每个事件监听器的详细信息*/
 	interface EventInfo {
 		/** 原始回调函数（未绑定的） */
@@ -403,4 +403,4 @@ namespace EventEmit {
 	}
 }
 
-export default EventEmit;
+export default EventEmitter;
