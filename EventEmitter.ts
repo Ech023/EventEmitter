@@ -16,6 +16,10 @@ namespace EventEmitter {
 	export class EventListen {
 		/** 内部存储：事件类型 -> 回调信息列表 */
 		private _eventMap: Map<string, EventInfo[]> = new Map();
+		/** 待处理事件队列参数Map */
+		private _emitQueue = new Map<string, { args: any[] }[]>();
+		/** 事件调度锁 */
+		private _flushing = false;
 		/**
 		 * 注册事件监听。如果相同 type、相同 callback、相同 target 的监听已存在，则不会重复注册。
 		 * @param type - 事件类型（必须为非空字符串）
@@ -190,19 +194,37 @@ namespace EventEmitter {
 		 * eventTarget.emit('scoreChanged', 100, 'level2');
 		 * ```
 		 */
-		public emit(type: string, ...args: any[]): void {
+		public emit(type: string, ...args: any[]) {
 			const callbacks = this._eventMap.get(type);
-			if (!callbacks) return;
-			const copy = [...callbacks];
-			for (const info of copy) {
-				if (typeof info.boundFunc !== "function") continue;
-				if (info.once) {
-					this.off(type, info.func, info.target);
-				}
-				try {
-					info.boundFunc(...args);
-				} catch (e) {
-					console.error(`[EventListen] error in "${type}":`, e);
+			if (!callbacks || callbacks.length === 0) return;
+			let queue = this._emitQueue.get(type);
+			if (!queue) {
+				queue = [];
+				this._emitQueue.set(type, queue);
+			}
+			queue.push({ args });
+			if (!this._flushing) {
+				this._flushing = true;
+				Promise.resolve().then(() => this._flush());
+			}
+		}
+		private _flush() {
+			const queues = new Map(this._emitQueue);
+			this._emitQueue.clear();
+			this._flushing = false;
+			for (const [type, queue] of queues) {
+				const callbacks = this._eventMap.get(type);
+				if (!callbacks || callbacks.length === 0) continue;
+				const snapshot = Array.from(callbacks);
+				for (const { args } of queue) {
+					for (const info of snapshot) {
+						if (info.once) this.off(type, info.func, info.target);
+						try {
+							info.boundFunc(...args);
+						} catch (err) {
+							console.error(`[EventListen] error in "${type}":`, err);
+						}
+					}
 				}
 			}
 		}
@@ -255,13 +277,14 @@ namespace EventEmitter {
 		 * - 事件 `changeAll`，参数为 (完整数据, newValue, oldValue, key)
 		 * @param key - 属性名
 		 * @param value - 新值（类型需与 T[K] 匹配）
+		 * @param deepEqual - 是否深度对比 默认打开
 		 * @returns 是否成功修改（值发生变化时返回 true，否则 false）
 		 */
-		public set<K extends keyof T>(key: K, value: T[K]) {
-			let hasKey = `changeKey:${key as string}`;
+		public set<K extends keyof T>(key: K, value: T[K], deepEqual: boolean = true) {
+			let hasKey = `changeKey_${key as string}`;
 			if (this.hasListeners(hasKey)) {
 				const oldValue = this._data[key];
-				if (this.deepEqual(oldValue, value)) return false;
+				if (deepEqual && this.deepEqual(oldValue, value)) return false;
 				this._data[key] = value;
 				this.emit(hasKey, value, oldValue, key);
 				this.emit("changeAll", { ...this._data }, key, value, oldValue);
@@ -282,7 +305,7 @@ namespace EventEmitter {
 		 * });
 		 */
 		public watch<K extends keyof T>(key: K, callback: (newValue: T[K], oldValue: T[K], key: K) => void, target: any = undefined) {
-			this.on(`changeKey:${key as string}`, callback, target);
+			this.on(`changeKey_${key as string}`, callback, target);
 		}
 
 		/**
@@ -309,7 +332,7 @@ namespace EventEmitter {
 		 * state.unwatch("count", cb);
 		 */
 		public unwatch<K extends keyof T>(key: K, callback: (...args: any[]) => void, target: any = undefined): void {
-			this.off(`changeKey:${key as string}`, callback, target);
+			this.off(`changeKey_${key as string}`, callback, target);
 		}
 
 		/*** 浅拷贝返回一个新对象，修改该拷贝不会影响原始数据 */
@@ -333,36 +356,31 @@ namespace EventEmitter {
 		}
 
 		/**
-		 * 深度比较两个值是否相等
+		 * 深度比较两个值是否相等 只满足基本的对象和数组 层级太深不对比
 		 * @param a - 第一个值
 		 * @param b - 第二个值
+		 * @param depth - 递归深度
 		 * @returns 是否深度相等
 		 */
-		deepEqual(a: T, b: T): boolean {
-			// 如果类型不同，不相等
-			if (typeof a !== typeof b) return false;
-			// 处理严格相等（包括 NaN 等）
+		deepEqual(a: T, b: T, depth = 0): boolean {
+			if (depth > 5) return false;
 			if (Object.is(a, b)) return true;
-			// 如果都不是对象或为 null，直接返回 false（因为 Object.is 已经处理过相等情况）
 			if (a === null || b === null) return false;
 			if (typeof a !== "object" || typeof b !== "object") return false;
-			// 处理数组
 			if (Array.isArray(a) && Array.isArray(b)) {
 				if (a.length !== b.length) return false;
 				for (let i = 0; i < a.length; i++) {
-					if (!this.deepEqual(a[i], b[i])) return false;
+					if (!this.deepEqual(a[i], b[i], depth + 1)) return false;
 				}
 				return true;
 			}
-			// 如果一个为数组一个不为数组，不相等
 			if (Array.isArray(a) !== Array.isArray(b)) return false;
-			// 处理普通对象
 			const keysA = Object.keys(a);
 			const keysB = Object.keys(b);
 			if (keysA.length !== keysB.length) return false;
 			for (const key of keysA) {
 				if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-				if (!this.deepEqual(a[key], b[key])) return false;
+				if (!this.deepEqual(a[key], b[key], depth + 1)) return false;
 			}
 			return true;
 		}
