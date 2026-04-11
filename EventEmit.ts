@@ -259,7 +259,7 @@ namespace EventEmit {
 			}
 			this._data[key] = value;
 			this.emit(`changeKey:${key as string}`, value, oldValue, key);
-			this.emit("changeAll", this._data, value, oldValue, key);
+			this.emit("changeAll", this._data, key, value, oldValue);
 			return true;
 		}
 
