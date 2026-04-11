@@ -2,13 +2,13 @@ namespace EventEmit {
 	/** 回调信息存储结构，用于内部维护每个事件监听器的详细信息*/
 	interface EventInfo {
 		/** 原始回调函数（未绑定的） */
-		func: Function;
+		func: (...args: any[]) => void;
 		/** 绑定的 this 对象，用于在回调中保持正确的上下文 */
 		target: any;
 		/** 是否为一次性监听（触发后自动移除） */
 		once: boolean;
 		/** 经过 bind 后的实际执行函数（已绑定 this） */
-		boundFunc: Function;
+		boundFunc: (...args: any[]) => void;
 		/** 批量注册时的分组标识（普通注册时为空字符串） */
 		batchKey: string;
 	}
@@ -31,7 +31,7 @@ namespace EventEmit {
 		 * eventTarget.on('init', this.onInit, this, true);
 		 * ```
 		 */
-		public on(type: string, callback: Function, target: any = undefined, once: boolean = false, batchKey: string = "") {
+		public on(type: string, callback: (...args: any[]) => void, target: any = undefined, once: boolean = false, batchKey: string = "") {
 			if (typeof type !== "string" || type === "") {
 				console.warn("[EventListen] type 必须是有效非空字符串");
 				return;
@@ -62,7 +62,7 @@ namespace EventEmit {
 		 * eventTarget.once('loaded', this.onLoaded, this);
 		 * ```
 		 */
-		public once(type: string, callback: Function, target: any = undefined) {
+		public once(type: string, callback: (...args: any[]) => void, target: any = undefined) {
 			this.on(type, callback, target, true);
 		}
 
@@ -79,7 +79,7 @@ namespace EventEmit {
 		 * ]);
 		 * ```
 		 */
-		public onBatch(batchKey: string, events: Array<{ type: string; callback: Function; target?: any; once?: boolean }>): void {
+		public onBatch(batchKey: string, events: Array<{ type: string; callback: (...args: any[]) => void; target?: any; once?: boolean }>): void {
 			if (typeof batchKey !== "string" || batchKey === "") {
 				console.warn("[EventListen] onBatch: key 必须是有效非空字符串");
 				return;
@@ -130,7 +130,7 @@ namespace EventEmit {
 		 * eventTarget.off('click');
 		 * ```
 		 */
-		public off(type: string, callback?: Function, target?: any): void {
+		public off(type: string, callback?: (...args: any[]) => void, target?: any): void {
 			const callbacks = this._eventMap.get(type);
 			if (!callbacks) return;
 			if (!callback) {
@@ -259,7 +259,7 @@ namespace EventEmit {
 			}
 			this._data[key] = value;
 			this.emit(`changeKey:${key as string}`, value, oldValue, key);
-			this.emit("changeAll", this._data, key, value, oldValue);
+			this.emit("changeAll", this._data, value, oldValue, key);
 			return true;
 		}
 
@@ -301,7 +301,7 @@ namespace EventEmit {
 		 * @example
 		 * state.unwatch("count", cb);
 		 */
-		public unwatch<K extends keyof T>(key: K, callback: Function, target?: any): void {
+		public unwatch<K extends keyof T>(key: K, callback: (...args: any[]) => void, target?: any): void {
 			this.off(`changeKey:${key as string}`, callback, target);
 		}
 
@@ -358,6 +358,40 @@ namespace EventEmit {
 				if (!this.deepEqual(a[key], b[key])) return false;
 			}
 			return true;
+		}
+	}
+	/**
+	 * 类型安全的事件监听类
+	 * @example
+	 * interface GameEvents {
+	 *   'scoreChange': (score: number) => void;
+	 *   'gameOver': (reason: string) => void;
+	 * }
+	 * const bus = new TypedEventListen<GameEvents>();
+	 * bus.emit('scoreChange', 100); // 类型安全
+	 * bus.emit('gameOver', 'timeout'); // 类型安全
+	 */
+	export class TypedEventListen<T extends Record<keyof T, (...args: any[]) => any>> {
+		private _bus = new EventListen();
+
+		public on<K extends keyof T>(type: K, callback: T[K]): void {
+			this._bus.on(type as string, callback as (...args: any[]) => void);
+		}
+
+		public once<K extends keyof T>(type: K, callback: T[K]): void {
+			this._bus.once(type as string, callback as (...args: any[]) => void);
+		}
+
+		public off<K extends keyof T>(type: K, callback?: T[K]): void {
+			this._bus.off(type as string, callback as any);
+		}
+
+		public emit<K extends keyof T>(type: K, ...args: Parameters<T[K]>): void {
+			this._bus.emit(type as string, ...args);
+		}
+
+		public removeAll() {
+			this._bus.removeAll();
 		}
 	}
 }
