@@ -25,7 +25,6 @@ namespace EventEmitter {
 		 * @param type - 事件类型（必须为非空字符串）
 		 * @param callback - 回调函数 如果该回调绑定了this target可以不穿
 		 * @param target - 可选，绑定的 this 对象（回调中的 this 将指向该对象）
-		 * @param once - 可选，是否一次性监听（默认为 false）
 		 * @param batchKey - 可选，批量分组标识（供 onBatch 内部使用，普通调用请留空）
 		 * @example
 		 * ```typescript
@@ -35,7 +34,11 @@ namespace EventEmitter {
 		 * eventTarget.on('init', this.onInit, this, true);
 		 * ```
 		 */
-		public on(type: string, callback: (...args: any[]) => void, target: any = undefined, once: boolean = false, batchKey: string = "") {
+		public on(type: string, callback: (...args: any[]) => void, target: any = undefined, batchKey: string = "") {
+			this._on(type, callback, target, false, batchKey);
+		}
+
+		private _on(type: string, callback: (...args: any[]) => void, target: any = undefined, once: boolean = false, batchKey: string = "") {
 			if (typeof type !== "string" || type === "") {
 				console.warn("[EventListen] type 必须是有效非空字符串");
 				return;
@@ -72,7 +75,7 @@ namespace EventEmitter {
 		 * ```
 		 */
 		public once(type: string, callback: (...args: any[]) => void, target: any = undefined) {
-			this.on(type, callback, target, true);
+			this._on(type, callback, target, true);
 		}
 
 		/**
@@ -94,7 +97,7 @@ namespace EventEmitter {
 				return;
 			}
 			for (const ev of events) {
-				this.on(ev.type, ev.callback, ev.target, false, batchKey);
+				this.on(ev.type, ev.callback, ev.target, batchKey);
 			}
 		}
 
@@ -453,7 +456,7 @@ namespace EventEmitter {
 				return;
 			}
 			for (const ev of events) {
-				this._bus.on(ev.type as string, ev.callback as (...args: any[]) => void, ev.target, false, batchKey);
+				this._bus.on(ev.type as string, ev.callback as (...args: any[]) => void, ev.target, batchKey);
 			}
 		}
 
