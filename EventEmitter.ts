@@ -34,11 +34,11 @@ namespace EventEmitter {
 		 * eventTarget.on('init', this.onInit, this, true);
 		 * ```
 		 */
-		public on(type: string, callback: (...args: any[]) => void, target: any = undefined, batchKey: string = "") {
+		public on(type: string, callback: (...args: any[]) => void, target?: any, batchKey: string = "") {
 			this._on(type, callback, target, false, batchKey);
 		}
 
-		private _on(type: string, callback: (...args: any[]) => void, target: any = undefined, once: boolean = false, batchKey: string = "") {
+		private _on(type: string, callback: (...args: any[]) => void, target?: any, once: boolean = false, batchKey: string = "") {
 			if (typeof type !== "string" || type === "") {
 				console.warn("[EventListen] type 必须是有效非空字符串");
 				return;
@@ -74,7 +74,7 @@ namespace EventEmitter {
 		 * eventTarget.once('loaded', this.onLoaded, this);
 		 * ```
 		 */
-		public once(type: string, callback: (...args: any[]) => void, target: any = undefined) {
+		public once(type: string, callback: (...args: any[]) => void, target?: any) {
 			this._on(type, callback, target, true);
 		}
 
@@ -142,22 +142,22 @@ namespace EventEmitter {
 		 * eventTarget.off('click');
 		 * ```
 		 */
-		public off(type: string, callback?: (...args: any[]) => void, target: any = undefined): void {
+		public off(type: string, callback?: (...args: any[]) => void, target?: any): void {
 			const callbacks = this._eventMap.get(type);
 			if (!callbacks) return;
 			if (!callback) {
 				this._eventMap.delete(type);
 				return;
 			}
-			const remaining = callbacks.filter(info => {
-				const isMatch = info.func === callback;
-				const targetMatch = target !== undefined ? info.target === target : info.target === undefined;
-				return !(isMatch && targetMatch);
+			const newCallbacks = callbacks.filter(info => {
+				if (info.func !== callback) return true;
+				if (target !== undefined && info.target !== target) return true;
+				return false;
 			});
-			if (remaining.length === 0) {
+			if (newCallbacks.length === 0) {
 				this._eventMap.delete(type);
 			} else {
-				this._eventMap.set(type, remaining);
+				this._eventMap.set(type, newCallbacks);
 			}
 		}
 
@@ -170,7 +170,7 @@ namespace EventEmitter {
 		 * eventTarget.targetOff(this);
 		 * ```
 		 */
-		public targetOff(target: any = undefined): void {
+		public targetOff(target?: any): void {
 			if (!target) return;
 			for (const [type, callbacks] of this._eventMap.entries()) {
 				const remaining = callbacks.filter(info => info.target !== target);
@@ -215,18 +215,30 @@ namespace EventEmitter {
 		private _flush() {
 			const queues = new Map(this._emitQueue);
 			this._emitQueue.clear();
+			const executedOnceSet = new Set<EventInfo>();
 			for (const [type, queue] of queues) {
 				const callbacks = this._eventMap.get(type);
 				if (!callbacks || callbacks.length === 0) continue;
 				const snapshot = Array.from(callbacks);
 				for (const { args } of queue) {
 					for (const info of snapshot) {
-						if (info.once) this.off(type, info.func, info.target);
+						if (executedOnceSet.has(info)) continue;
 						try {
 							info.boundFunc(...args);
+							if (info.once) executedOnceSet.add(info);
 						} catch (err) {
 							console.error(`[EventListen] error in "${type}":`, err);
 						}
+					}
+				}
+			}
+			for (const info of executedOnceSet) {
+				for (const [type, callbacks] of this._eventMap) {
+					const idx = callbacks.indexOf(info);
+					if (idx !== -1) {
+						callbacks.splice(idx, 1);
+						if (callbacks.length === 0) this._eventMap.delete(type);
+						break;
 					}
 				}
 			}
@@ -323,7 +335,7 @@ namespace EventEmitter {
 		 *     console.log(`用户信息已更新`, newUser);
 		 * });
 		 */
-		public watch<K extends keyof T>(key: K, callback: (newValue: T[K], oldValue: T[K], key: K) => void, target: any = undefined) {
+		public watch<K extends keyof T>(key: K, callback: (newValue: T[K], oldValue: T[K], key: K) => void, target?: any) {
 			this.on(`changeKey_${key as string}`, callback, target);
 		}
 
@@ -338,7 +350,7 @@ namespace EventEmitter {
 		 *     console.log(`属性 ${key} 由 ${oldVal} 变为 ${newVal}，当前数据：`, newData);
 		 * });
 		 */
-		public watchAll(callback: (data: T, key: keyof T, newValue: any, oldValue: any) => void, target: any = undefined) {
+		public watchAll(callback: (data: T, key: keyof T, newValue: any, oldValue: any) => void, target?: any) {
 			return this.on("changeAll", callback, target);
 		}
 
@@ -350,7 +362,7 @@ namespace EventEmitter {
 		 * @example
 		 * state.unwatch("count", cb);
 		 */
-		public unwatch<K extends keyof T>(key: K, callback: (...args: any[]) => void, target: any = undefined): void {
+		public unwatch<K extends keyof T>(key: K, callback: (...args: any[]) => void, target?: any): void {
 			this.off(`changeKey_${key as string}`, callback, target);
 		}
 
@@ -435,45 +447,44 @@ namespace EventEmitter {
 	 * bus.emit('scoreChange', 100); // 类型安全
 	 * bus.emit('gameOver', 'timeout'); // 类型安全
 	 */
-	export class TypedEventListen<T extends Record<keyof T, (...args: any[]) => void>> {
-		private _bus = new EventListen();
-
-		public on<K extends keyof T>(type: K, callback: T[K], target: any = undefined): void {
-			this._bus.on(type as string, callback as (...args: any[]) => void, target);
+	export class TypedEventListen<T extends Record<keyof T, (...args: any[]) => void>> extends EventListen {
+		//@ts-expect-error
+		public on<K extends keyof T>(type: K, callback: T[K], target?: any): void {
+			super.on(type as string, callback as (...args: any[]) => void, target);
 		}
-
-		public once<K extends keyof T>(type: K, callback: T[K], target: any = undefined): void {
-			this._bus.once(type as string, callback as (...args: any[]) => void, target);
+		//@ts-expect-error
+		public once<K extends keyof T>(type: K, callback: T[K], target?: any): void {
+			super.once(type as string, callback as (...args: any[]) => void, target);
 		}
-
-		public off<K extends keyof T>(type: K, callback?: T[K], target: any = undefined): void {
-			this._bus.off(type as string, callback as (...args: any[]) => void, target);
+		//@ts-expect-error
+		public off<K extends keyof T>(type: K, callback?: T[K], target?: any): void {
+			super.off(type as string, callback as (...args: any[]) => void, target);
 		}
-
+		//@ts-expect-error
 		public onBatch(batchKey: string, events: Array<{ type: keyof T; callback: T[keyof T]; target?: any }>) {
 			if (typeof batchKey !== "string" || batchKey === "") {
 				console.warn("[TypedEventListen] onBatch: batchKey 必须是有效非空字符串");
 				return;
 			}
 			for (const ev of events) {
-				this._bus.on(ev.type as string, ev.callback as (...args: any[]) => void, ev.target, batchKey);
+				super.on(ev.type as string, ev.callback as (...args: any[]) => void, ev.target, batchKey);
 			}
 		}
 
 		public offBatch(batchKey: string): void {
-			this._bus.offBatch(batchKey);
+			super.offBatch(batchKey);
 		}
-
+		// @ts-expect-error
 		public emit<K extends keyof T>(type: K, ...args: Parameters<T[K]>): void {
-			this._bus.emit(type as string, ...args);
+			super.emit(type as string, ...args);
 		}
 
 		public removeAll() {
-			this._bus.removeAll();
+			super.removeAll();
 		}
 
 		public getAll() {
-			return this._bus.getAllListeners();
+			return super.getAllListeners();
 		}
 	}
 }
