@@ -44,7 +44,7 @@ namespace EventEmitter {
 				console.warn("[EventListen] callback 必须是函数");
 				return;
 			}
-			const boundFunc = target == undefined ? callback.bind(target) : callback;
+			const boundFunc = target !== undefined ? callback.bind(target) : callback;
 			const _info: EventInfo = { func: callback, target, once, boundFunc, batchKey };
 			if (!this._eventMap.has(type)) {
 				this._eventMap.set(type, []);
@@ -79,22 +79,22 @@ namespace EventEmitter {
 		 * 批量注册事件（分组注册）。所有通过 onBatch 注册的事件会携带相同的 batchKey，便于统一管理。
 		 *
 		 * @param batchKey - 分组标识（必须为非空字符串），用于后续通过 offBatch 批量移除
-		 * @param events - 事件配置数组，每个元素包含 type, callback, target(可选), once(可选)
+		 * @param events - 事件配置数组，每个元素包含 type, callback, target(可选),
 		 * @example
 		 * ```typescript
 		 * eventTarget.onBatch('playerGroup', [
 		 *     { type: 'levelUp', callback: this.onLevelUp, target: this },
-		 *     { type: 'death', callback: this.onDeath, target: this, once: true }
+		 *     { type: 'death', callback: this.onDeath, target: this,  }
 		 * ]);
 		 * ```
 		 */
-		public onBatch(batchKey: string, events: Array<{ type: string; callback: (...args: any[]) => void; target: any; once?: boolean }>): void {
+		public onBatch(batchKey: string, events: Array<{ type: string; callback: (...args: any[]) => void; target: any }>) {
 			if (typeof batchKey !== "string" || batchKey === "") {
-				console.warn("[EventListen] onBatch: key 必须是有效非空字符串");
+				console.warn("[EventListen] onBatch: batchKey 必须是有效非空字符串");
 				return;
 			}
 			for (const ev of events) {
-				this.on(ev.type, ev.callback, ev.target, ev.once, batchKey);
+				this.on(ev.type, ev.callback, ev.target, false, batchKey);
 			}
 		}
 
@@ -208,10 +208,10 @@ namespace EventEmitter {
 				Promise.resolve().then(() => this._flush());
 			}
 		}
+
 		private _flush() {
 			const queues = new Map(this._emitQueue);
 			this._emitQueue.clear();
-			this._flushing = false;
 			for (const [type, queue] of queues) {
 				const callbacks = this._eventMap.get(type);
 				if (!callbacks || callbacks.length === 0) continue;
@@ -227,6 +227,7 @@ namespace EventEmitter {
 					}
 				}
 			}
+			this._flushing = false;
 		}
 
 		/**
@@ -238,6 +239,24 @@ namespace EventEmitter {
 		 */
 		public removeAll(): void {
 			this._eventMap.clear();
+		}
+		/**
+		 * @returns 获取所有已注册的事件监听器信息 全部是只允许读的 不允许操作
+		 */
+		public getAllListeners() {
+			const result: Record<string, readonly Readonly<{ func: (...args: any[]) => void; target: any; once: boolean; batchKey: string }>[]> = {};
+			for (const [type, infos] of this._eventMap.entries()) {
+				const frozenInfos = infos.map(info =>
+					Object.freeze({
+						func: info.func,
+						target: info.target,
+						once: info.once,
+						batchKey: info.batchKey,
+					}),
+				);
+				result[type] = Object.freeze(frozenInfos);
+			}
+			return Object.freeze(result);
 		}
 	}
 
@@ -277,20 +296,17 @@ namespace EventEmitter {
 		 * - 事件 `changeAll`，参数为 (完整数据, newValue, oldValue, key)
 		 * @param key - 属性名
 		 * @param value - 新值（类型需与 T[K] 匹配）
-		 * @param deepEqual - 是否深度对比 默认打开
-		 * @returns 是否成功修改（值发生变化时返回 true，否则 false）
+		 * @param deepEqual - 是否深度对比 默认打开 类型必须要类似
 		 */
 		public set<K extends keyof T>(key: K, value: T[K], deepEqual: boolean = true) {
 			let hasKey = `changeKey_${key as string}`;
 			if (this.hasListeners(hasKey)) {
 				const oldValue = this._data[key];
-				if (deepEqual && this.deepEqual(oldValue, value)) return false;
+				if (deepEqual && this.deepEqual(oldValue, value)) return;
 				this._data[key] = value;
 				this.emit(hasKey, value, oldValue, key);
 				this.emit("changeAll", { ...this._data }, key, value, oldValue);
-				return true;
 			}
-			return false;
 		}
 
 		/**
@@ -362,25 +378,45 @@ namespace EventEmitter {
 		 * @param depth - 递归深度
 		 * @returns 是否深度相等
 		 */
-		deepEqual(a: T, b: T, depth = 0): boolean {
-			if (depth > 5) return false;
+		deepEqual(a: any, b: any, depth = 0, maxDepth = 5, seen = new Map()): boolean {
+			if (seen.has(a) && seen.get(a) === b) return true;
+			seen.set(a, b);
+			if (depth > maxDepth) return Object.is(a, b);
 			if (Object.is(a, b)) return true;
 			if (a === null || b === null) return false;
-			if (typeof a !== "object" || typeof b !== "object") return false;
-			if (Array.isArray(a) && Array.isArray(b)) {
-				if (a.length !== b.length) return false;
-				for (let i = 0; i < a.length; i++) {
-					if (!this.deepEqual(a[i], b[i], depth + 1)) return false;
+			const typeA = typeof a;
+			const typeB = typeof b;
+			if (typeA !== typeB) return false;
+			if (typeA !== "object") return false;
+			const constructorA = a.constructor;
+			const constructorB = b.constructor;
+			if (constructorA !== constructorB) return false;
+			if (a instanceof RegExp) return a.toString() === b.toString();
+			if (a instanceof Date) return a.getTime() === b.getTime();
+			if (a instanceof Map) {
+				if (a.size !== b.size) return false;
+				for (const [k, v] of a) {
+					if (!b.has(k) || !this.deepEqual(v, b.get(k), depth + 1, maxDepth, seen)) return false;
 				}
 				return true;
 			}
-			if (Array.isArray(a) !== Array.isArray(b)) return false;
-			const keysA = Object.keys(a);
-			const keysB = Object.keys(b);
+			if (a instanceof Set) {
+				if (a.size !== b.size) return false;
+				const arrA = Array.from(a).sort();
+				const arrB = Array.from(b).sort();
+				return this.deepEqual(arrA, arrB, depth + 1, maxDepth, seen);
+			}
+			if (a instanceof ArrayBuffer) {
+				const bufA = new Uint8Array(a);
+				const bufB = new Uint8Array(b);
+				return bufA.length === bufB.length && bufA.every((v, i) => v === bufB[i]);
+			}
+			const keysA = Reflect.ownKeys(a);
+			const keysB = Reflect.ownKeys(b);
 			if (keysA.length !== keysB.length) return false;
 			for (const key of keysA) {
 				if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-				if (!this.deepEqual(a[key], b[key], depth + 1)) return false;
+				if (!this.deepEqual(a[key], b[key], depth + 1, maxDepth, seen)) return false;
 			}
 			return true;
 		}
@@ -411,12 +447,30 @@ namespace EventEmitter {
 			this._bus.off(type as string, callback as (...args: any[]) => void, target);
 		}
 
+		public onBatch(batchKey: string, events: Array<{ type: keyof T; callback: T[keyof T]; target?: any }>) {
+			if (typeof batchKey !== "string" || batchKey === "") {
+				console.warn("[TypedEventListen] onBatch: batchKey 必须是有效非空字符串");
+				return;
+			}
+			for (const ev of events) {
+				this._bus.on(ev.type as string, ev.callback as (...args: any[]) => void, ev.target, false, batchKey);
+			}
+		}
+
+		public offBatch(batchKey: string): void {
+			this._bus.offBatch(batchKey);
+		}
+
 		public emit<K extends keyof T>(type: K, ...args: Parameters<T[K]>): void {
 			this._bus.emit(type as string, ...args);
 		}
 
 		public removeAll() {
 			this._bus.removeAll();
+		}
+
+		public getAll() {
+			return this._bus.getAllListeners();
 		}
 	}
 }
