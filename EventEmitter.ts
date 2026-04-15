@@ -103,15 +103,17 @@ export namespace EventEmitter {
 		 *
 		 * @example
 		 * ```typescript
-		 * emitter.onBatch('playerGroup', [
-		 *   { eventKey: 'levelUp', callback: this.onLevelUp, target: this },
-		 *   { eventKey: 'death', callback: this.onDeath, target: this }
-		 * ]);
+		 *   emitter.onBatch('playerGroup', {
+		 *   levelUp: { callback: this.onLevelUp, target: this },
+		 *   death: { callback: this.onDeath, target: this }
+		 * });
 		 * ```
 		 */
-		public onBatch(batchKey: string, events: { eventKey: string; callback: (...args: any[]) => void; target: any }[]): void {
+		public onBatch(batchKey: string, events: Record<string, { callback: (...args: any[]) => void; target?: any }>): void {
 			if (!batchKey) return;
-			for (const event of events) this.on(event.eventKey, event.callback, event.target, batchKey);
+			for (const [eventKey, { callback, target }] of Object.entries(events)) {
+				this.on(eventKey, callback, target, batchKey);
+			}
 		}
 
 		/**
@@ -230,27 +232,35 @@ export namespace EventEmitter {
 		private _trigger(): void {
 			const queues = this._queue;
 			this._queue = new Map();
-			const toRemove = new Set<EventInfo>();
 			for (const [eventKey, argsList] of queues) {
 				const list = this._events.get(eventKey);
-				if (!list?.length) continue;
-				const snapshot = list;
+				if (!list || list.length === 0) continue;
+				const snapshot = list.slice();
+				const toRemove = new Set<EventInfo>();
 				for (const args of argsList) {
-					for (const info of snapshot) {
+					for (let i = 0; i < snapshot.length; i++) {
+						const info = snapshot[i];
 						if (toRemove.has(info)) continue;
 						try {
 							info.boundFunc(...args);
-							if (info.once) toRemove.add(info);
+							if (info.once) {
+								toRemove.add(info);
+							}
 						} catch (error) {
 							console.error(`事件:${eventKey},触发错误:`, error);
 						}
 					}
 				}
+				if (toRemove.size) {
+					const remaining = list.filter(info => !toRemove.has(info));
+					if (remaining.length) {
+						this._events.set(eventKey, remaining);
+					} else {
+						this._events.delete(eventKey);
+					}
+				}
 			}
-			for (const [eventKey, list] of this._events) {
-				const filtered = list.filter(item => !toRemove.has(item));
-				filtered.length ? this._events.set(eventKey, filtered) : this._events.delete(eventKey);
-			}
+
 			this._isFlushing = false;
 			if (this._queue.size > 0) {
 				this._isFlushing = true;
@@ -570,18 +580,30 @@ export namespace EventEmitter {
 		/**
 		 * 类型安全批量订阅
 		 * @param batchKey - 分组标识
-		 * @param events - 事件列表，每个元素包含 `eventKey`、`callback`、`target`（可选）
+		 * @param events - 事件配置对象，键为事件名，值为包含 `callback` 和可选 `target` 的对象
 		 *
 		 * @example
 		 * ```typescript
-		 * bus.onBatch('playerGroup', [
-		 *   { eventKey: 'levelUp', callback: this.onLevelUp, target: this },
-		 *   { eventKey: 'death', callback: this.onDeath, target: this }
-		 * ]);
+		 * typedBus.listens('playerGroup', {
+		 *   levelUp: { callback: this.onLevelUp, target: this },
+		 *   death: { callback: this.onDeath, target: this }
+		 * });
 		 * ```
 		 */
-		public listens<K extends keyof T>(batchKey: string, events: Array<{ eventKey: K; callback: T[K] extends (...args: any[]) => void ? T[K] : never; target?: any }>) {
-			this._eventBus.onBatch(batchKey, events as any);
+		public listens(batchKey: string, events: { [E in keyof T]?: { callback: T[E]; target?: any } }): void {
+			if (!batchKey) return;
+			// 转换为普通对象供内部 EventListen 使用
+			const rawEvents: Record<string, { callback: (...args: any[]) => void; target?: any }> = {};
+			for (const key in events) {
+				const config = events[key];
+				if (config && config.callback) {
+					rawEvents[key as string] = {
+						callback: config.callback as any,
+						target: config.target,
+					};
+				}
+			}
+			this._eventBus.onBatch(batchKey, rawEvents);
 		}
 
 		/**

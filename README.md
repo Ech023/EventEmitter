@@ -67,10 +67,10 @@ emitter.once("init", () => console.log("只执行一次"));
 | events   | Array<{eventKey, callback, target}> | 事件配置数组 |
 
 ```typescript
-emitter.onBatch("playerGroup", [
-	{ eventKey: "levelUp", callback: this.onLevelUp, target: this },
-	{ eventKey: "death", callback: this.onDeath, target: this },
-]);
+emitter.onBatch("playerGroup", {
+	levelUp: { callback: this.onLevelUp, target: this },
+	death: { callback: this.onDeath, target: this },
+});
 ```
 
 #### offBatch(batchKey)
