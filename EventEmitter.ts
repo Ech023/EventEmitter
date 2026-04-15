@@ -1,490 +1,443 @@
-namespace EventEmitter {
-	/** 回调信息存储结构，用于内部维护每个事件监听器的详细信息*/
+export namespace EventEmitter {
+	/**
+	 * 事件监听器信息
+	 * @internal 内部使用
+	 */
 	interface EventInfo {
-		/** 原始回调函数（未绑定的） */
+		/** 原始回调函数 */
 		func: (...args: any[]) => void;
-		/** 绑定的 this 对象，用于在回调中保持正确的上下文 */
+		/** 绑定的 this 上下文 */
 		target: any | undefined;
-		/** 是否为一次性监听（触发后自动移除） */
+		/** 是否为一次性监听 */
 		once: boolean;
-		/** 经过 bind 后的实际执行函数（已绑定 this） */
+		/** 绑定 this 后的最终执行函数 */
 		boundFunc: (...args: any[]) => void;
-		/** 批量注册时的分组标识（普通注册时为空字符串） */
+		/** 批量分组 key，用于批量取消 */
 		batchKey: string;
 	}
 
+	/**
+	 * 事件核心类
+	 * @description 实现事件的订阅、发布、取消、批量管理等完整功能
+	 */
 	export class EventListen {
-		/** 内部存储：事件类型 -> 回调信息列表 */
-		private _eventMap: Map<string, EventInfo[]> = new Map();
-		/** 待处理事件队列参数Map */
-		private _emitQueue = new Map<string, { args: any[] }[]>();
-		/** 事件调度锁 */
-		private _flushing = false;
-		/**
-		 * 注册事件监听。如果相同 type、相同 callback、相同 target 的监听已存在，则不会重复注册。
-		 * @param type - 事件类型（必须为非空字符串）
-		 * @param callback - 回调函数 如果该回调绑定了this target可以不穿
-		 * @param target - 可选，绑定的 this 对象（回调中的 this 将指向该对象）
-		 * @param batchKey - 可选，批量分组标识（供 onBatch 内部使用，普通调用请留空）
-		 * @example
-		 * ```typescript
-		 * // 普通注册，绑定 this 为当前组件
-		 * eventTarget.on('click', this.onClick, this);
-		 * // 一次性监听
-		 * eventTarget.on('init', this.onInit, this, true);
-		 * ```
-		 */
-		public on(type: string, callback: (...args: any[]) => void, target?: any, batchKey: string = "") {
-			this._on(type, callback, target, false, batchKey);
-		}
+		/** 事件存储：key=事件名，value=监听器数组 */
+		private _events = new Map<string, EventInfo[]>();
+		/** 异步事件队列：用于微任务批量执行 */
+		private _queue = new Map<string, any[][]>();
+		/** 是否正在刷新队列，防止重复执行 */
+		private _isFlushing = false;
 
-		private _on(type: string, callback: (...args: any[]) => void, target?: any, once: boolean = false, batchKey: string = "") {
-			if (typeof type !== "string" || type === "") {
-				console.warn("[EventListen] type 必须是有效非空字符串");
+		/**
+		 * 订阅事件
+		 * @param type 事件名称
+		 * @param callback 事件回调
+		 * @param target 回调绑定的 this
+		 * @param batchKey 批量分组key，用于批量取消
+		 */
+		public on(type: string, callback: (...args: any[]) => void, target?: any, batchKey = ""): void {
+			if (!type || typeof callback !== "function") {
+				console.warn("[EventListen] 无效监听");
 				return;
 			}
-			if (typeof callback !== "function") {
-				console.warn("[EventListen] callback 必须是函数");
-				return;
+			let list = this._events.get(type);
+			if (!list) {
+				list = [];
+				this._events.set(type, list);
 			}
-			const boundFunc = target !== undefined ? callback.bind(target) : callback;
-			const _info: EventInfo = { func: callback, target, once, boundFunc, batchKey };
-			if (!this._eventMap.has(type)) {
-				this._eventMap.set(type, []);
-			}
-			const list = this._eventMap.get(type)!;
-			const exists = list.some(info => info.target === target && info.func === callback);
-			if (!exists) {
-				list.push(_info);
-			}
-		}
-		/** 检查某个事件类型是否有监听器*/
-		public hasListeners(type: string): boolean {
-			const callbacks = this._eventMap.get(type);
-			return callbacks !== undefined && callbacks.length > 0;
+			const exists = list.some(it => it.target === target && it.func === callback);
+			if (exists) return;
+			const boundFunc = target ? callback.bind(target) : callback;
+			list.push({ func: callback, target, once: false, boundFunc, batchKey });
 		}
 
 		/**
-		 * 注册一次性事件监听（触发一次后自动移除）。
-		 * @param type - 事件类型
-		 * @param callback - 回调函数
-		 * @param target - 可选，绑定的 this 对象
-		 * @example
-		 * ```typescript
-		 * eventTarget.once('loaded', this.onLoaded, this);
-		 * ```
+		 * 订阅一次性事件（触发后自动取消）
+		 * @param type 事件名称
+		 * @param callback 事件回调
+		 * @param target 回调绑定的 this
 		 */
-		public once(type: string, callback: (...args: any[]) => void, target?: any) {
-			this._on(type, callback, target, true);
+		public once(type: string, callback: (...args: any[]) => void, target?: any): void {
+			if (!type || typeof callback !== "function") return;
+			let list = this._events.get(type);
+			if (!list) {
+				list = [];
+				this._events.set(type, list);
+			}
+			const boundFunc = target ? callback.bind(target) : callback;
+			list.push({ func: callback, target, once: true, boundFunc, batchKey: "" });
 		}
 
 		/**
-		 * 批量注册事件（分组注册）。所有通过 onBatch 注册的事件会携带相同的 batchKey，便于统一管理。
-		 *
-		 * @param batchKey - 分组标识（必须为非空字符串），用于后续通过 offBatch 批量移除
-		 * @param events - 事件配置数组，每个元素包含 type, callback, target(可选),
-		 * @example
-		 * ```typescript
-		 * eventTarget.onBatch('playerGroup', [
-		 *     { type: 'levelUp', callback: this.onLevelUp, target: this },
-		 *     { type: 'death', callback: this.onDeath, target: this,  }
-		 * ]);
-		 * ```
+		 * 批量订阅事件（统一分组）
+		 * @param batchKey 分组标识
+		 * @param events 事件列表
 		 */
-		public onBatch(batchKey: string, events: Array<{ type: string; callback: (...args: any[]) => void; target: any }>) {
-			if (typeof batchKey !== "string" || batchKey === "") {
-				console.warn("[EventListen] onBatch: batchKey 必须是有效非空字符串");
-				return;
-			}
-			for (const ev of events) {
-				this.on(ev.type, ev.callback, ev.target, batchKey);
-			}
+		public onBatch(batchKey: string, events: { type: string; callback: (...args: any[]) => void; target: any }[]): void {
+			if (!batchKey) return;
+			for (const ev of events) this.on(ev.type, ev.callback, ev.target, batchKey);
 		}
 
 		/**
-		 * 批量移除事件（按分组标识）。
-		 * @param batchKey - 分组标识（必须为非空字符串），将与回调信息中的 batchKey 匹配
-		 * @example
-		 * ```typescript
-		 * // 移除 'playerGroup' 分组下注册的所有事件
-		 * eventTarget.offBatch('playerGroup');
-		 * ```
+		 * 取消指定分组的所有事件
+		 * @param batchKey 分组标识
 		 */
 		public offBatch(batchKey: string): void {
-			if (typeof batchKey !== "string" || batchKey === "") {
-				return;
-			}
-			for (const [type, callbacks] of this._eventMap.entries()) {
-				const remaining = callbacks.filter(info => info.batchKey !== batchKey);
-				if (remaining.length === 0) {
-					this._eventMap.delete(type);
-				} else {
-					this._eventMap.set(type, remaining);
-				}
+			if (!batchKey) return;
+			for (const [type, list] of this._events) {
+				const filtered = list.filter(it => it.batchKey !== batchKey);
+				filtered.length ? this._events.set(type, filtered) : this._events.delete(type);
 			}
 		}
 
 		/**
-		 * 移除事件监听（精确匹配）。
-		 * - 若只提供 type 和 callback，则会移除该 type 下所有匹配 callback 的监听（无论 target 是什么）。
-		 * - 若同时提供 target，则只会移除 callback 和 target 都匹配的监听。
-		 * - 如果不传 callback，则会移除该 type 下的所有监听。
-		 * @param type - 事件类型
-		 * @param callback - 需要移除的回调函数（必须与注册时是同一个函数引用）
-		 * @param target - 可选，绑定的 this 对象（必须与注册时完全一致，用于精确定位 否则可能不会移除）
-		 * @example
-		 * ```typescript
-		 * // 移除特定回调（不限定 target）
-		 * eventTarget.off('click', this.onClick);
-		 * // 移除特定回调且指定 target
-		 * eventTarget.off('click', this.onClick, this);
-		 * // 移除整个类型的所有监听
-		 * eventTarget.off('click');
-		 * ```
+		 * 取消事件订阅
+		 * @param type 事件名称
+		 * @param callback 要取消的回调
+		 * @param target 绑定的this
 		 */
 		public off(type: string, callback?: (...args: any[]) => void, target?: any): void {
-			const callbacks = this._eventMap.get(type);
-			if (!callbacks) return;
+			const list = this._events.get(type);
+			if (!list) return;
 			if (!callback) {
-				this._eventMap.delete(type);
+				this._events.delete(type);
 				return;
 			}
-			const newCallbacks = callbacks.filter(info => {
-				if (info.func !== callback) return true;
-				if (target !== undefined && info.target !== target) return true;
+			const filtered = list.filter(it => {
+				if (it.func !== callback) return true;
+				if (target !== undefined && it.target !== target) return true;
 				return false;
 			});
-			if (newCallbacks.length === 0) {
-				this._eventMap.delete(type);
-			} else {
-				this._eventMap.set(type, newCallbacks);
-			}
+			filtered.length ? this._events.set(type, filtered) : this._events.delete(type);
 		}
 
 		/**
-		 * 移除指定 target 下的所有事件监听。
-		 * @param target - 目标对象（与注册时传入的 target 严格相等）
-		 * @example
-		 * ```typescript
-		 * // 移除当前组件注册的所有事件
-		 * eventTarget.targetOff(this);
-		 * ```
+		 * 取消指定 target 绑定的所有事件
+		 * @param target 目标对象
 		 */
-		public targetOff(target?: any): void {
+		public targetOff(target: any): void {
 			if (!target) return;
-			for (const [type, callbacks] of this._eventMap.entries()) {
-				const remaining = callbacks.filter(info => info.target !== target);
-				if (remaining.length === 0) {
-					this._eventMap.delete(type);
-				} else {
-					this._eventMap.set(type, remaining);
-				}
+			for (const [type, list] of this._events) {
+				const filtered = list.filter(it => it.target !== target);
+				filtered.length ? this._events.set(type, filtered) : this._events.delete(type);
 			}
 		}
 
 		/**
-		 * 派发事件，触发所有已注册的回调函数。
-		 *
-		 * @param type - 事件类型
-		 * @param args - 传递给回调函数的参数（建议不超过 5 个，以保证性能）
-		 * @example
-		 * ```typescript
-		 * // 无参数
-		 * eventTarget.emit('start');
-		 * // 推荐使用对象传参
-		 * eventTarget.emit("update", { a: 1, b: 2 });
-		 * // 带多个参数
-		 * eventTarget.emit('scoreChanged', 100, 'level2');
-		 * ```
+		 * 判断某个事件是否存在监听器
+		 * @param type 事件名称
+		 * @returns boolean
 		 */
-		public emit(type: string, ...args: any[]) {
-			const callbacks = this._eventMap.get(type);
-			if (!callbacks || callbacks.length === 0) return;
-			let queue = this._emitQueue.get(type);
-			if (!queue) {
-				queue = [];
-				this._emitQueue.set(type, queue);
-			}
-			queue.push({ args });
-			if (!this._flushing) {
-				this._flushing = true;
+		public hasListeners(type: string): boolean {
+			const list = this._events.get(type);
+			return !!list?.length;
+		}
+
+		/**
+		 * 发布事件（异步执行，微任务）
+		 * @param type 事件名称
+		 * @param args 传递的参数
+		 */
+		public emit(type: string, ...args: any[]): void {
+			const list = this._events.get(type);
+			if (!list?.length) return;
+			const queue = this._queue.get(type) || [];
+			queue.push(args);
+			this._queue.set(type, queue);
+			if (!this._isFlushing) {
+				this._isFlushing = true;
 				Promise.resolve().then(() => this._flush());
 			}
 		}
 
-		private _flush() {
-			const queues = new Map(this._emitQueue);
-			this._emitQueue.clear();
-			const executedOnceSet = new Set<EventInfo>();
-			for (const [type, queue] of queues) {
-				const callbacks = this._eventMap.get(type);
-				if (!callbacks || callbacks.length === 0) continue;
-				const snapshot = Array.from(callbacks);
-				for (const { args } of queue) {
+		/**
+		 * 刷新事件队列，批量执行所有事件回调
+		 * @internal
+		 */
+		private _flush(): void {
+			const queues = this._queue;
+			this._queue = new Map();
+			const toRemove = new Set<EventInfo>();
+			for (const [type, argsList] of queues) {
+				const list = this._events.get(type);
+				if (!list?.length) continue;
+				const snapshot = list;
+				for (const args of argsList) {
 					for (const info of snapshot) {
-						if (executedOnceSet.has(info)) continue;
+						if (toRemove.has(info)) continue;
 						try {
 							info.boundFunc(...args);
-							if (info.once) executedOnceSet.add(info);
-						} catch (err) {
-							console.error(`[EventListen] error in "${type}":`, err);
+							if (info.once) toRemove.add(info);
+						} catch (e) {
+							console.error(`事件:${type},触发错误:`, e);
 						}
 					}
 				}
 			}
-			for (const info of executedOnceSet) {
-				for (const [type, callbacks] of this._eventMap) {
-					const idx = callbacks.indexOf(info);
-					if (idx !== -1) {
-						callbacks.splice(idx, 1);
-						if (callbacks.length === 0) this._eventMap.delete(type);
-						break;
-					}
-				}
+			for (const [type, list] of this._events) {
+				const filtered = list.filter(it => !toRemove.has(it));
+				filtered.length ? this._events.set(type, filtered) : this._events.delete(type);
 			}
-			this._flushing = false;
+			this._isFlushing = false;
+			if (this._queue.size > 0) {
+				this._isFlushing = true;
+				Promise.resolve().then(() => this._flush());
+			}
+		}
+
+		/** 清空所有事件与队列 */
+		public removeAll(): void {
+			this._events.clear();
+			this._queue.clear();
 		}
 
 		/**
-		 * 移除所有事件监听。
-		 * @example
-		 * ```typescript
-		 * eventTarget.removeAll();
-		 * ```
+		 * 获取所有监听器信息（用于调试）
+		 * @returns 只读的事件监听器快照
 		 */
-		public removeAll(): void {
-			this._eventMap.clear();
-		}
-		/**
-		 * @returns 获取所有已注册的事件监听器信息 全部是只允许读的 不允许操作
-		 */
-		public getAllListeners() {
-			const result: Record<string, readonly Readonly<{ func: (...args: any[]) => void; target: any; once: boolean; batchKey: string }>[]> = {};
-			for (const [type, infos] of this._eventMap.entries()) {
-				const frozenInfos = infos.map(info =>
-					Object.freeze({
-						func: info.func,
-						target: info.target,
-						once: info.once,
-						batchKey: info.batchKey,
-					}),
-				);
-				result[type] = Object.freeze(frozenInfos);
+		public getAllListeners(): Readonly<Record<string, readonly { func: Function; target: any; once: boolean }[]>> {
+			const result: Record<string, any[]> = {};
+			for (const [type, list] of this._events) {
+				result[type] = list.map(it => ({ func: it.func, target: it.target, once: it.once }));
 			}
-			return Object.freeze(result);
+			return result;
 		}
 	}
 
 	/**
-	 * 数据观察者类，基于 EventListen 实现对象属性的响应式监听。
-	 * 当通过 set 修改属性值时，若新值与旧值不同，
-	 * 则会自动触发对应属性的变更事件（changeKey:属性名）以及全局变更事件（changeAll）。
+	 * 响应式数据观察者
+	 * @description 基于事件系统实现的数据响应式，支持监听属性变化
 	 */
 	export class Observer<T extends Record<string, any>> extends EventListen {
-		/** 存储实际数据的对象 */
+		/** 内部存储的真实数据 */
 		private _data: T;
 
 		/**
-		 * 构造函数，接收初始数据对象。
-		 * @param initialData - 初始数据，必须符合泛型 T 的结构
+		 * 创建响应式数据
+		 * @param initial 初始数据
 		 */
-		constructor(initialData: T) {
+		constructor(initial: T) {
 			super();
-			this._data = { ...initialData };
+			this._data = this._deepCopy(initial);
 		}
 
 		/**
-		 * 获取指定 key 的值。
-		 * @param key - 属性名（必须是 T 的键）
-		 * @returns 对应的值
-		 * @example
-		 * state.get("count"); // 返回声明时的相应类型
+		 * 深拷贝（支持对象/数组/Date/Map/Set）
+		 * @param val 要拷贝的值
+		 * @returns 深拷贝后的值
 		 */
-		public get<K extends keyof T>(key: K): T[K] {
-			return this._data[key];
+		private _deepCopy<U>(val: U): U {
+			if (val === null || typeof val !== "object") return val;
+			if (val instanceof Date) return new Date(val) as U;
+			if (val instanceof Map) return new Map(val) as U;
+			if (val instanceof Set) return new Set(val) as U;
+			if (Array.isArray(val)) return [...val] as unknown as U;
+			return { ...val } as U;
 		}
 
 		/**
-		 * 设置指定 key 的值。
-		 * 若新值与旧值不同（使用 Object.is 比较），则触发：
-		 * - 事件 `changeKey:属性名`，参数为 (newValue, oldValue, key)
-		 * - 事件 `changeAll`，参数为 (完整数据, newValue, oldValue, key)
-		 * @param key - 属性名
-		 * @param value - 新值（类型需与 T[K] 匹配）
-		 * @param deepEqual - 是否深度对比 默认打开 类型必须要类似
+		 * 获取数据（返回深拷贝，防止外部篡改）
+		 * @param k 键名
+		 * @returns 对应值
 		 */
-		public set<K extends keyof T>(key: K, value: T[K], deepEqual: boolean = true) {
-			let hasKey = `changeKey_${key as string}`;
-			if (this.hasListeners(hasKey)) {
-				const oldValue = this._data[key];
-				if (deepEqual && this.deepEqual(oldValue, value)) return;
+		public get<K extends keyof T>(k: K): T[K] {
+			return this._deepCopy(this._data[k]);
+		}
+
+		/**
+		 * 获取完整数据（深拷贝）
+		 * @returns 完整数据
+		 */
+		public getAllData(): T {
+			return this._deepCopy(this._data);
+		}
+
+		/**
+		 * 设置数据（自动触发监听）
+		 * @param key 键名
+		 * @param value 新值
+		 * @param forceEmit 是否强制触发更新，无视值是否相等
+		 */
+		public set<K extends keyof T>(key: K, value: T[K], forceEmit = false): void {
+			const oldValue = this._data[key];
+			const isEqual = typeof value === "object" ? this._deepEqual(oldValue, value) : Object.is(oldValue, value);
+			if (!forceEmit && isEqual) return;
+			const eventKey = `changeKey_${String(key)}`;
+			if (this.hasListeners(eventKey)) {
 				this._data[key] = value;
-				this.emit(hasKey, value, oldValue, key);
-				this.emit("changeAll", { ...this._data }, key, value, oldValue);
+				this.emit(eventKey, key, value, oldValue);
+				this.emit("changeAll", key, value, oldValue, this._data);
 			}
 		}
 
 		/**
-		 * 监听指定属性的变化。
-		 * 当该属性通过 set 方法修改且值发生变化时，注册的回调函数会被调用。
-		 * @param key - 属性名
-		 * @param callback - 回调函数，参数为 (newValue, oldValue, key)
-		 * @param target - 可选，绑定的 this 对象（回调中的 this 将指向该对象）
-		 * @example
-		 * state.watch("user", (newUser, oldUser, key) => {
-		 *     console.log(`用户信息已更新`, newUser);
-		 * });
+		 * 批量设置数据
+		 * @param data 部分数据
 		 */
-		public watch<K extends keyof T>(key: K, callback: (newValue: T[K], oldValue: T[K], key: K) => void, target?: any) {
-			this.on(`changeKey_${key as string}`, callback, target);
-		}
-
-		/**
-		 * 监听全部属性的变化（全局监听）。
-		 * 当任意属性通过 set 方法修改且值发生变化时，注册的回调函数会被调用。
-		 * @param callback - 回调函数，参数为 (更新后的完整数据, 被修改的属性名, 新值, 旧值)
-		 * @param target - 可选，绑定的 this 对象
-		 * @returns 回调标识（取决于底层 on 方法的返回值），可用于后续取消监听
-		 * @example
-		 * state.watchAll((newData, key, newVal, oldVal) => {
-		 *     console.log(`属性 ${key} 由 ${oldVal} 变为 ${newVal}，当前数据：`, newData);
-		 * });
-		 */
-		public watchAll(callback: (data: T, key: keyof T, newValue: any, oldValue: any) => void, target?: any) {
-			return this.on("changeAll", callback, target);
-		}
-
-		/**
-		 * 取消对指定属性的监听。
-		 * @param key - 属性名
-		 * @param callback - 回调函数（必须与 watch 时传入的是同一个函数引用）
-		 * @param target - 可选，绑定的 this 对象（必须与 watch 时传入的一致，否则可能无法移除）
-		 * @example
-		 * state.unwatch("count", cb);
-		 */
-		public unwatch<K extends keyof T>(key: K, callback: (...args: any[]) => void, target?: any): void {
-			this.off(`changeKey_${key as string}`, callback, target);
-		}
-
-		/*** 浅拷贝返回一个新对象，修改该拷贝不会影响原始数据 */
-		public getAllData(): T {
-			return { ...this._data };
-		}
-
-		/**
-		 * 批量设置多个属性。
-		 * 每个属性的 set 操作会独立触发各自的事件（changeKey 和 changeAll）。
-		 * @param updates - 要更新的键值对对象（Partial<T>）
-		 * @example
-		 * state.setMultiple({ count: 100, flag: false });
-		 */
-		public setMultiple(updates: Partial<T>): void {
-			for (const key in updates) {
-				if (Object.prototype.hasOwnProperty.call(updates, key)) {
-					this.set(key as keyof T, updates[key] as T[keyof T]);
+		public setMultiple(data: Partial<T>) {
+			for (const k in data) {
+				if (Object.prototype.hasOwnProperty.call(data, k)) {
+					this.set(k as keyof T, data[k]!);
 				}
 			}
 		}
 
 		/**
-		 * 深度比较两个值是否相等 只满足基本的对象和数组 层级太深不对比
-		 * @param a - 第一个值
-		 * @param b - 第二个值
-		 * @param depth - 递归深度
-		 * @returns 是否深度相等
+		 * 深度比较两个值是否相等
+		 * @param a 比较值A
+		 * @param b 比较值B
+		 * @param d 当前递归深度
+		 * @returns 是否相等
 		 */
-		deepEqual(a: any, b: any, depth = 0, maxDepth = 5, seen = new Map()): boolean {
-			if (seen.has(a) && seen.get(a) === b) return true;
-			seen.set(a, b);
-			if (depth > maxDepth) return Object.is(a, b);
+		private _deepEqual(a: any, b: any, d = 0): boolean {
+			const MAX = 5;
+			if (d > MAX) return Object.is(a, b);
 			if (Object.is(a, b)) return true;
-			if (a === null || b === null) return false;
-			const typeA = typeof a;
-			const typeB = typeof b;
-			if (typeA !== typeB) return false;
-			if (typeA !== "object") return false;
-			const constructorA = a.constructor;
-			const constructorB = b.constructor;
-			if (constructorA !== constructorB) return false;
-			if (a instanceof RegExp) return a.toString() === b.toString();
+			if (!a || !b) return !a && !b;
+			if (typeof a !== "object" || typeof b !== "object") return false;
+			if (a.constructor !== b.constructor) return false;
 			if (a instanceof Date) return a.getTime() === b.getTime();
+			if (a instanceof RegExp) return a.toString() === b.toString();
+
 			if (a instanceof Map) {
 				if (a.size !== b.size) return false;
-				for (const [k, v] of a) {
-					if (!b.has(k) || !this.deepEqual(v, b.get(k), depth + 1, maxDepth, seen)) return false;
-				}
+				for (const [k, v] of a) if (!this._deepEqual(v, b.get(k), d + 1)) return false;
 				return true;
 			}
+
 			if (a instanceof Set) {
-				if (a.size !== b.size) return false;
-				const arrA = Array.from(a).sort();
-				const arrB = Array.from(b).sort();
-				return this.deepEqual(arrA, arrB, depth + 1, maxDepth, seen);
+				return this._deepEqual([...a].sort(), [...b].sort(), d + 1);
 			}
-			if (a instanceof ArrayBuffer) {
-				const bufA = new Uint8Array(a);
-				const bufB = new Uint8Array(b);
-				return bufA.length === bufB.length && bufA.every((v, i) => v === bufB[i]);
-			}
-			const keysA = Reflect.ownKeys(a);
-			const keysB = Reflect.ownKeys(b);
-			if (keysA.length !== keysB.length) return false;
-			for (const key of keysA) {
-				if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-				if (!this.deepEqual(a[key], b[key], depth + 1, maxDepth, seen)) return false;
-			}
+
+			const ka = Object.keys(a);
+			const kb = Object.keys(b);
+			if (ka.length !== kb.length) return false;
+			for (const k of ka) if (!this._deepEqual(a[k], b[k], d + 1)) return false;
 			return true;
 		}
+
+		/**
+		 * 监听单个属性变化
+		 * @param key 监听的属性名
+		 * @param cb 回调：key, newValue, oldValue
+		 * @param t 绑定this
+		 */
+		public watch<K extends keyof T>(key: K, cb: (key: K, newValue: T[K], oldValue: T[K]) => void, t?: any) {
+			this.on(`changeKey_${String(key)}`, cb, t);
+		}
+
+		/**
+		 * 监听所有属性变化
+		 * @param cb 回调：key, newValue, oldValue, fullData
+		 * @param t 绑定this
+		 */
+		public watchAll(cb: (key: keyof T, newValue: any, oldValue: any, fullData: T) => void, t?: any) {
+			this.on("changeAll", cb, t);
+		}
+
+		/**
+		 * 取消单个属性监听
+		 * @param key 属性名
+		 * @param cb 回调
+		 * @param t 绑定this
+		 */
+		public unwatch<K extends keyof T>(key: K, cb: (key: K, newValue: T[K], oldValue: T[K]) => void, t?: any) {
+			this.off(`changeKey_${String(key)}`, cb, t);
+		}
 	}
+
 	/**
-	 * 类型安全的事件监听类
-	 * @example
-	 * interface GameEvents {
-	 *   'scoreChange': (score: number) => void;
-	 *   'gameOver': (reason: string) => void;
-	 * }
-	 * const bus = new TypedEventListen<GameEvents>();
-	 * bus.emit('scoreChange', 100); // 类型安全
-	 * bus.emit('gameOver', 'timeout'); // 类型安全
+	 * 类型安全的事件总线
+	 * @description 基于泛型提供事件名、回调参数的智能提示与类型校验
 	 */
-	export class TypedEventListen<T extends Record<keyof T, (...args: any[]) => void>> extends EventListen {
-		//@ts-expect-error
-		public on<K extends keyof T>(type: K, callback: T[K], target?: any): void {
-			super.on(type as string, callback as (...args: any[]) => void, target);
-		}
-		//@ts-expect-error
-		public once<K extends keyof T>(type: K, callback: T[K], target?: any): void {
-			super.once(type as string, callback as (...args: any[]) => void, target);
-		}
-		//@ts-expect-error
-		public off<K extends keyof T>(type: K, callback?: T[K], target?: any): void {
-			super.off(type as string, callback as (...args: any[]) => void, target);
-		}
-		//@ts-expect-error
-		public onBatch(batchKey: string, events: Array<{ type: keyof T; callback: T[keyof T]; target?: any }>) {
-			if (typeof batchKey !== "string" || batchKey === "") {
-				console.warn("[TypedEventListen] onBatch: batchKey 必须是有效非空字符串");
-				return;
-			}
-			for (const ev of events) {
-				super.on(ev.type as string, ev.callback as (...args: any[]) => void, ev.target, batchKey);
-			}
+	export class TypedEventListen<T> {
+		/** 内部事件总线实例 */
+		private _eventBus = new EventListen();
+
+		/**
+		 * 类型安全订阅事件
+		 * @param type 事件名（自动提示）
+		 * @param callback 回调（参数自动推导）
+		 * @param target 绑定this
+		 */
+		public on<K extends keyof T>(type: K, callback: T[K] extends (...args: any[]) => void ? T[K] : never, target?: any): void {
+			this._eventBus.on(type as string, callback as any, target);
 		}
 
+		/**
+		 * 类型安全一次性订阅
+		 * @param type 事件名
+		 * @param callback 回调
+		 * @param target 绑定this
+		 */
+		public once<K extends keyof T>(type: K, callback: T[K] extends (...args: any[]) => void ? T[K] : never, target?: any): void {
+			this._eventBus.once(type as string, callback as any, target);
+		}
+
+		/**
+		 * 类型安全取消订阅
+		 * @param type 事件名
+		 * @param callback 回调
+		 * @param target 绑定this
+		 */
+		public off<K extends keyof T>(type: K, callback?: T[K] extends (...args: any[]) => void ? T[K] : never, target?: any): void {
+			this._eventBus.off(type as string, callback as any, target);
+		}
+
+		/**
+		 * 类型安全发布事件
+		 * @param type 事件名
+		 * @param args 参数（自动校验类型）
+		 */
+		public emit<K extends keyof T>(type: K, ...args: T[K] extends (...args: any[]) => void ? Parameters<T[K]> : never[]): void {
+			this._eventBus.emit(type as string, ...args);
+		}
+
+		/**
+		 * 类型安全批量订阅
+		 * @param batchKey 分组key
+		 * @param events 事件列表（type自动提示）
+		 */
+		public onBatch<K extends keyof T>(batchKey: string, events: Array<{ type: K; callback: T[K] extends (...args: any[]) => void ? T[K] : never; target?: any }>) {
+			this._eventBus.onBatch(batchKey, events as any);
+		}
+
+		/**
+		 * 取消批量订阅
+		 * @param batchKey 分组key
+		 */
 		public offBatch(batchKey: string): void {
-			super.offBatch(batchKey);
-		}
-		// @ts-expect-error
-		public emit<K extends keyof T>(type: K, ...args: Parameters<T[K]>): void {
-			super.emit(type as string, ...args);
+			this._eventBus.offBatch(batchKey);
 		}
 
-		public removeAll() {
-			super.removeAll();
+		/**
+		 * 取消指定target的所有监听
+		 * @param target 目标对象
+		 */
+		public targetOff(target: any): void {
+			this._eventBus.targetOff(target);
 		}
 
-		public getAll() {
-			return super.getAllListeners();
+		/** 清空所有事件 */
+		public removeAll(): void {
+			this._eventBus.removeAll();
+		}
+
+		/**
+		 * 是否存在监听
+		 * @param type 事件名
+		 * @returns boolean
+		 */
+		public hasListeners(type: string): boolean {
+			return this._eventBus.hasListeners(type);
+		}
+
+		/**
+		 * 获取所有监听器（调试用）
+		 * @returns 监听器快照
+		 */
+		public getAllListeners() {
+			return this._eventBus.getAllListeners();
 		}
 	}
 }
