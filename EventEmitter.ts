@@ -41,6 +41,8 @@ export namespace EventEmitter {
 		private _queue = new Map<string, any[][]>();
 		/** 是否正在刷新队列，防止重复执行 */
 		private _isFlushing = false;
+		/** 用于生成唯一key的计数器 */
+		private _uniqueValue: number = 0;
 
 		/**
 		 * 订阅事件
@@ -109,9 +111,15 @@ export namespace EventEmitter {
 		 * });
 		 * ```
 		 */
-		public onBatch(batchKey: string, events: Record<string, { callback: (...args: any[]) => void; target?: any }>): void {
+		/**
+		 * 批量订阅事件（统一分组）
+		 * @param batchKey - 分组标识（非空字符串）
+		 * @param events - 事件名 => 回调函数
+		 * @param target - 统一绑定 this（可选）
+		 */
+		public onBatch<T = any>(batchKey: string, events: Record<string, (...args: any[]) => void>, target?: any): void {
 			if (!batchKey) return;
-			for (const [eventKey, { callback, target }] of Object.entries(events)) {
+			for (const [eventKey, callback] of Object.entries(events)) {
 				this.on(eventKey, callback, target, batchKey);
 			}
 		}
@@ -590,20 +598,9 @@ export namespace EventEmitter {
 		 * });
 		 * ```
 		 */
-		public listens(batchKey: string, events: { [E in keyof T]?: { callback: T[E]; target?: any } }): void {
+		public listens(batchKey: string, events: { [E in keyof T]?: T[E] }, target?: any): void {
 			if (!batchKey) return;
-			// 转换为普通对象供内部 EventListen 使用
-			const rawEvents: Record<string, { callback: (...args: any[]) => void; target?: any }> = {};
-			for (const key in events) {
-				const config = events[key];
-				if (config && config.callback) {
-					rawEvents[key as string] = {
-						callback: config.callback as any,
-						target: config.target,
-					};
-				}
-			}
-			this._eventBus.onBatch(batchKey, rawEvents);
+			this._eventBus.onBatch(batchKey, events as Record<string, (...args: any[]) => void>, target);
 		}
 
 		/**
