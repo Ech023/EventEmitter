@@ -1,196 +1,118 @@
-import { Semaphore } from "./list";
-
-interface DeviceInfo {
-	exePath: string;
-	platform: string;
-	arch: string;
-	osType: string;
-	osRelease: string;
-	cpuModel: string;
-	cpuCores: number;
-	totalMemory: string;
-	freeMemory: string;
-	hostname: string;
-	appVersion: string;
-}
-
-interface DownloadProgress {
-	fileName: string;
-	received: number;
-	total: number;
-	progress: number;
-}
-
-interface DownloadResult {
-	fileName: string;
-	success?: boolean;
-	error?: string;
-}
-
-interface ElectronBridge {
-	onDeviceInfo: (callback: (info: DeviceInfo) => void) => void;
-	onDownloadProgress: (callback: (progress: DownloadProgress) => void) => void;
-	onDownloadComplete: (callback: (result: DownloadResult) => void) => void;
-	onDownloadError: (callback: (result: DownloadResult) => void) => void;
-	getDeviceInfo: () => Promise<DeviceInfo>;
-	downloadFile: (info: { url: string; fileName: string; savePath?: string }) => Promise<{ success: boolean; data?: number[]; error?: string }>;
-	showMessageBox: (type: string, title: string, message: string) => Promise<{ response: number }>;
-}
-
-declare global {
-	interface Window {
-		electronBridge: ElectronBridge;
-	}
-}
-
-const { ccclass, property } = cc._decorator;
-
-@ccclass("electronBridge")
-export class electronBridge {
-	private static instance: electronBridge;
-
-	static getInstance(): electronBridge {
-		if (!this.instance) {
-			this.instance = new electronBridge();
-		}
-		return this.instance;
-	}
-
-	isElectron(): boolean {
-		return typeof window !== "undefined" && !!window.electronBridge;
-	}
-
-	async getDeviceInfo(): Promise<DeviceInfo | null> {
-		if (!this.isElectron()) {
-			console.warn("[ElectronBridge] 非 Electron 环境");
-			return null;
-		}
-		return await window.electronBridge.getDeviceInfo();
-	}
-
-	async downloadFile(info: { url: string; fileName: string; savePath?: string }): Promise<{ success: boolean; error?: string }> {
-		if (!this.isElectron()) {
-			console.warn("[ElectronBridge] 非 Electron 环境，使用原生下载");
-			return { success: false, error: "Not in Electron" };
-		}
-		return await window.electronBridge.downloadFile(info);
-	}
-
-	onDeviceInfo(callback: (info: DeviceInfo) => void): void {
-		if (this.isElectron()) {
-			window.electronBridge.onDeviceInfo(callback);
-		}
-	}
-
-	onDownloadProgress(callback: (progress: DownloadProgress) => void): void {
-		if (this.isElectron()) {
-			window.electronBridge.onDownloadProgress(callback);
-		}
-	}
-
-	onDownloadComplete(callback: (result: DownloadResult) => void): void {
-		if (this.isElectron()) {
-			window.electronBridge.onDownloadComplete(callback);
-		}
-	}
-
-	onDownloadError(callback: (result: DownloadResult) => void): void {
-		if (this.isElectron()) {
-			window.electronBridge.onDownloadError(callback);
-		}
-	}
-
-	async showMessageBox(type: "none" | "info" | "error" | "question" | "warning", title: string, message: string): Promise<number> {
-		if (!this.isElectron()) {
-			console.warn("[ElectronBridge] 非 Electron 环境");
-			return 0;
-		}
-		const result = await window.electronBridge.showMessageBox(type, title, message);
-		return result.response;
-	}
-}
-
-@ccclass("DownloadManager")
-export class DownloadManager extends cc.Component {
-	@property(cc.JsonAsset)
-	//@ts-ignore
-	json: cc.JsonAsset = null;
-
-	async onLoad(): Promise<void> {
-		const bridge = electronBridge.getInstance();
-		bridge.onDownloadProgress(progress => {
-			this.updateProgress(progress.progress);
-		});
-		bridge.onDownloadComplete(result => {
-			if (result.success) {
-				console.log(`[DownloadManager] ${result.fileName} 下载完成!`);
-				this.onDownloadComplete();
+/**
+ * 异步信号量（核心：控制异步任务的并发数量）
+ * 适用场景：接口请求并发限制、批量文件上传、异步任务队列
+ * 原理：通过「令牌池」实现限流 —— 令牌数量 = 最大并发数
+ * @example 
+ *      const Limiter = new ConcurrencyLimiter(8);
+		const doTask = async (taskId: number) => {
+			await Limiter.request();
+			try {
+				await new Promise(resolve => {
+					const delay = Math.random() * 3000;
+					setTimeout(resolve, delay);
+				});
+				Limiter.release();
+			} catch (err) {
+				console.error(err);
+				throw err;
 			}
-		});
-		bridge.onDownloadError(result => {
-			console.error(`[DownloadManager] 下载失败: ${result.error}`);
-			this.onDownloadError(result.error || "未知错误");
-		});
-
-		let DeviceInfo = await bridge.getDeviceInfo();
-
-		let _info: {
-			version: "5.0.0.1295";
-			packageUrl: "https://storage.xbkids.cn/cocosv2/test/electronHotUpdate";
-			remoteManifestUrl: "https://storage.xbkids.cn/cocosv2/test/electronHotUpdate/5.0.0.1295/project.manifest";
-			remoteVersionUrl: "https://storage.xbkids.cn/cocosv2/test/electronHotUpdate/5.0.0.1295/version.manifest";
-			assets: Record<string, { size: number; md5: string }>;
-		} = this.json.json;
-		console.log(_info);
-
-		let _url = `${_info.packageUrl}/${_info.version}/`;
-		let infoArr: { url: string; fileName: string; fileSavePath: string }[] = [];
-		for (let [key, info] of Object.entries(_info.assets)) {
-			let a: { url: string; fileName: string; fileSavePath: string } = { url: `${_url}${key}`, fileName: key.split("/").pop()!, fileSavePath: `${DeviceInfo?.exePath}/${key}` };
-			infoArr.push(a);
-		}
-		const semaphore = new Semaphore(128);
-		let doTask = async (info: { url: string; fileName: string; savePath?: string }) => {
-			await semaphore.acquire(); // 拿令牌
-			console.log(`任务${info.url} 开始执行`);
-			// 模拟异步：加载资源/网络请求
-			await this.startDownload(info);
-			console.log(`任务${info.url} 完成执行`);
-			semaphore.release(); // 还令牌
 		};
-		// infoArr.forEach(info => {
-		// 	doTask(info);
-		// });
-		for (let info in infoArr) {
-			await doTask(infoArr[info]);
-			console.log(`完成执行完成执行完成执行 ${info}/${infoArr.length}`);
+		const taskList: Promise<void>[] = [];
+		for (let i = 1; i <= 100; i++) {
+			taskList.release(doTask(i));
 		}
-		// 等待所有任务完成
-		semaphore.waitForAll().then(() => {
-			console.log("所有任务执行完毕！");
+		await Promise.all(taskList);
+		await Limiter.waitForAll();
+ */
+export class ConcurrencyLimiter {
+	/**
+	 * 等待队列
+	 * 存储：所有暂时拿不到令牌、需要等待的任务「resolve函数」
+	 * 释放令牌时，从队列头部取出一个任务唤醒执行
+	 */
+	private _tasks: ((value: void | PromiseLike<void>) => void)[] = [];
+	/**
+	 * 当前【可用令牌数】 用户控制是否还能开启新的并发
+	 * 获取令牌 request() → _count -1
+	 * 释放令牌 release() → _count +1
+	 */
+	private _count: number;
+	/**
+	 * 最大并发执行数 = 总令牌数
+	 * 构造时传入，永不改变
+	 */
+	private _maxCount: number;
+
+	/**
+	 * 构造函数：初始化信号量
+	 * @param _maxCount 最大并发数（必须 ≥ 1）
+	 */
+	constructor(_maxCount: number) {
+		this._tasks = [];
+		if (_maxCount < 1) _maxCount = 1;
+		this._maxCount = _maxCount;
+		this._count = _maxCount;
+	}
+
+	/**
+	 * 获取令牌（任务执行前必须调用）
+	 * 逻辑：
+	 * 1. 有令牌 → 直接占用，继续执行
+	 * 2. 无令牌 → 进入等待队列，阻塞异步流程
+	 * @returns Promise<void> 拿到令牌后才会 resolve
+	 */
+	async request(): Promise<void> {
+		if (this._count > 0) {
+			this._count--;
+			return Promise.resolve();
+		}
+		return new Promise<void>(resolve => {
+			this._tasks.push(resolve);
 		});
-
-		this.startDownload({ url: "https://opencode.ai/zh/download/stable/windows-x64-nsis", fileName: "ydfy.exe" });
 	}
 
-	async startDownload(info: { url: string; fileName: string; savePath?: string }): Promise<void> {
-		const bridge = electronBridge.getInstance();
-		await bridge.downloadFile(info);
+	/**
+	 * 释放令牌（任务执行完必须调用）
+	 * 逻辑：
+	 * 1. 有等待任务 → 唤醒队列第一个任务（不归还令牌）
+	 * 2. 无等待任务 → 归还令牌，恢复可用数量
+	 */
+	release(): void {
+		const next = this._tasks.shift();
+		if (next) {
+			next();
+		} else {
+			if (this._count < this._maxCount) {
+				this._count++;
+			}
+		}
 	}
 
-	updateProgress(progress: number): void {
-		console.log(`${progress} / 100`);
+	/**
+	 * 等待【所有任务】全部执行完毕
+	 * 满足两个条件才会完成：
+	 * 1. 等待队列清空（无排队任务）
+	 * 2. 所有令牌都已归还（count === maxCount）
+	 * @returns Promise<void>
+	 */
+	waitForAll(): Promise<void> {
+		return new Promise(resolve => {
+			const check = () => {
+				if (this._tasks.length === 0 && this._count === this._maxCount) {
+					resolve();
+				} else {
+					this._tasks.push(() => check());
+				}
+			};
+			check();
+		});
 	}
-
-	onDownloadComplete(): void {
-		console.log("文件下载成功");
-		return;
-		electronBridge.getInstance().showMessageBox("info", "下载完成", "文件下载成功!");
-	}
-
-	onDownloadError(error: string): void {
-		electronBridge.getInstance().showMessageBox("error", "下载失败", error);
+	/** 获取任务的相关数据 */
+	requestListInfo() {
+		return {
+			waitLen: this._tasks.length,
+			canRun: this._count,
+			maxCount: this._maxCount,
+		};
 	}
 }
-
-export { electronBridge as ElectronBridge };
