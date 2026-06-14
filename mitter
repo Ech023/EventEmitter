@@ -1,0 +1,272 @@
+/**
+ * 事件处理函数：接收一个事件参数，无返回值
+ * @remarks 为避免 this 指向问题，推荐使用箭头函数或手动 bind
+ */
+type Handler<T = unknown> = (event: T) => void;
+
+/**某个事件类型对应的处理函数数组*/
+type EventHandlerList<T = unknown> = Array<Handler<T>>;
+
+/**
+ * 事件映射表：每个事件类型映射到一个处理函数数组
+ * @typeParam Events - 事件映射类型，键为事件名，值为事件参数类型
+ */
+type EventHandlerMap<Events extends Record<EventType, unknown>> = Map<keyof Events, EventHandlerList<Events[keyof Events]>>;
+
+/**事件类型基础类型*/
+type EventType = string | symbol;
+
+export interface Emitter<Events extends Record<EventType, unknown>> {
+	/** 事件映射表，可直接访问（用于调试或高级操作）*/
+	all: EventHandlerMap<Events>;
+
+	/**
+	 * 注册事件监听
+	 *
+	 * @typeParam Key - 事件名称（必须是 Events 的键）
+	 * @param type - 事件类型
+	 * @param handler - 处理函数（推荐使用箭头函数以避免 this 问题）
+	 *
+	 * @example
+	 * ```typescript
+	 * emitter.on('userLogin', (data) => {
+	 *     console.log(data.name);
+	 * });
+	 * ```
+	 */
+	on<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>): void;
+
+	/**
+	 * 移除事件监听
+	 *
+	 * @typeParam Key - 事件名称
+	 * @param type - 事件类型
+	 * @param handler - 可选，指定要移除的处理函数；不传则移除该类型的所有监听
+	 *
+	 * @example
+	 * ```typescript
+	 * // 移除特定处理函数
+	 * emitter.off('userLogin', loginHandler);
+	 * // 移除所有 'userLogin' 监听
+	 * emitter.off('userLogin');
+	 * ```
+	 */
+	off<Key extends keyof Events>(type: Key, handler?: Handler<Events[Key]>): void;
+
+	/**
+	 * 触发事件
+	 *
+	 * @typeParam Key - 事件名称
+	 * @param type - 事件类型
+	 * @param event - 事件数据（必须与事件类型匹配）
+	 *
+	 * @example
+	 * ```typescript
+	 * emitter.emit('userLogin', { uid: 1, name: 'Alice' });
+	 * emitter.emit('userLogout', undefined);
+	 * ```
+	 */
+	emit<Key extends keyof Events>(type: Key, event: Events[Key]): void;
+
+	/**
+	 * 批量注册一组事件监听（按组管理，便于统一移除）
+	 *
+	 * @param bindKey - 组名，用于后续移除
+	 * @param handlers - 处理函数数组，每个元素包含事件类型和处理函数
+	 *
+	 * @example
+	 * ```typescript
+	 * emitter.binds('auth', [
+	 *     { type: 'userLogin', handler: (data) => console.log(data.name) },
+	 *     { type: 'userLogout', handler: () => console.log('logged out') }
+	 * ]);
+	 * ```
+	 */
+	binds(bindKey: string, handlers: Array<{ type: keyof Events; handler: Handler<any> }>): void;
+
+	/**
+	 * 移除整个组的所有监听
+	 */
+	unbinds(bindKey: string): void;
+
+	/**
+	 * 销毁所有事件监听，清空映射表和组记录
+	 */
+	destroy(): void;
+}
+/**
+ * 事件发射器接口
+ * @typeParam Events - 事件映射类型，例如 `{ login: { uid: number }; logout: void }`
+ * @example
+ * ```typescript
+ * interface IAppEvents {
+ *   userLogin: { uid: number; name: string };
+ *   userLogout: undefined;
+ *   dataLoaded: string[];
+ * }
+ * const emitter = mitt<IAppEvents>();
+ * emitter.on('userLogin', (data) => console.log(data.uid));
+ * emitter.emit('userLogin', { uid: 123, name: 'Bob' });
+ * emitter.emit('userLogout', undefined);
+ * ```
+ */
+export default function mitt<Events extends Record<EventType, unknown> = Record<EventType, unknown>>(
+	all?: EventHandlerMap<Events>,
+): Emitter<Events> {
+	const eventMap: Map<keyof Events, EventHandlerList<Events[keyof Events]>> = all ?? new Map();
+	const groups = new Map<string, Array<{ type: keyof Events; handler: Handler<any> }>>();
+
+	function addHandler(type: keyof Events, handler: Handler<any>): void {
+		const handlers = eventMap.get(type) as EventHandlerList<Events[keyof Events]> | undefined;
+		if (handlers) {
+			handlers.push(handler);
+		} else {
+			eventMap.set(type, [handler]);
+		}
+	}
+
+	function removeHandler(type: keyof Events, handler?: Handler<any>): void {
+		const handlers = eventMap.get(type) as EventHandlerList<Events[keyof Events]> | undefined;
+		if (!handlers) return;
+
+		if (handler) {
+			const idx = handlers.indexOf(handler);
+			if (idx !== -1) {
+				handlers.splice(idx, 1);
+			}
+			if (handlers.length === 0) {
+				eventMap.delete(type);
+			}
+		} else {
+			eventMap.delete(type);
+		}
+	}
+
+	const emitter: Emitter<Events> = {
+		all: eventMap,
+		on(type, handler) {
+			addHandler(type, handler);
+		},
+		off(type, handler) {
+			removeHandler(type, handler);
+		},
+		emit(type, event) {
+			const handlers = eventMap.get(type) as EventHandlerList<Events[keyof Events]> | undefined;
+			if (handlers) {
+				for (let i = 0; i < handlers.length; i++) {
+					handlers[i](event);
+				}
+			}
+		},
+		binds(bindKey, bindList) {
+			if (groups.has(bindKey)) {
+				this.unbinds(bindKey);
+			}
+			const registered: Array<{ type: keyof Events; handler: Handler<any> }> = [];
+			for (const item of bindList) {
+				addHandler(item.type, item.handler);
+				registered.push({ type: item.type, handler: item.handler });
+			}
+			groups.set(bindKey, registered);
+		},
+		unbinds(bindKey) {
+			const registered = groups.get(bindKey);
+			if (!registered) return;
+			for (const { type, handler } of registered) {
+				removeHandler(type, handler);
+			}
+			groups.delete(bindKey);
+		},
+		destroy() {
+			eventMap.clear();
+			groups.clear();
+		},
+	};
+
+	return emitter;
+}
+
+/**
+ * 观察者类型别名：简化类型映射
+ */
+type ObserverEvents<T extends Record<string, any>> = { [K in keyof T]: T[K] };
+
+/**
+ * 观察者类：基于 Proxy 监听普通对象的属性变化，自动触发同名事件。
+ * 仅支持直接属性赋值（不支持数组、不支持嵌套对象内部变化的监听）。
+ * 当对象的任意属性被重新赋值时，会触发与属性名相同的事件，并将新值作为参数传递给监听器。
+ * @typeParam T - 被观察对象的类型，必须是键为 string 的普通对象类型
+ * @example
+ * ```typescript
+ * const obs = new Observer({ a: 1, b: 'hello', c: true });
+ * // 监听属性 a 的变化
+ * obs.on('a', (newVal) => {
+ *     console.log(`a 变为 ${newVal}`);
+ *     if (newVal === 2) {
+ *         console.log('条件满足：a 变成了 2！');
+ *     }
+ * });
+ * // 修改属性，触发事件
+ * obs.getData().a = 2;   // 输出: a 变为 2  条件满足：a 变成了 2！
+ * obs.getData().b = 'world'; // 输出: b 变为 world
+ * obs.getData().c = false;   // 输出: c 变为 false
+ * // 销毁观察者（停止所有事件）
+ * obs.destroy();
+ * ```
+ *
+ * @remarks
+ * - 处理函数推荐使用箭头函数以避免 `this` 指向问题
+ * - 使用 `getData()` 获取代理对象，直接修改其属性即可触发事件
+ * - 不会递归监听嵌套对象内部变化
+ */
+export class Observer<T extends Record<string, any>> {
+	private data: T;
+	private emitter: Emitter<ObserverEvents<T>>;
+
+	/** 创建一个观察者实例
+	 * @param initialData - 初始数据对象
+	 */
+	constructor(initialData: T) {
+		this.emitter = mitt<ObserverEvents<T>>();
+		this.data = new Proxy(initialData, {
+			set: (target: T, prop: string, value: any, receiver: any): boolean => {
+				// 1. 如果属性名不是字符串（比如 Symbol），直接执行原始赋值并返回，不触发事件
+				if (typeof prop !== "string") {
+					return Reflect.set(target, prop, value, receiver);
+				}
+				// 2. 因为 prop 是字符串，将它断言为 T 的合法键名
+				const key = prop as keyof T;
+				// 3. 读取旧值
+				const oldValue = target[key];
+				// 4. 执行真正的属性赋值，并获取结果布尔值
+				const result = Reflect.set(target, key, value, receiver);
+				// 5. 如果新旧值不相等，触发同名事件，将新值传出去
+				if (oldValue !== value) {
+					this.emitter.emit(key, value);
+				}
+				// 6. 返回赋值结果（必须返回布尔值）
+				return result;
+			},
+		});
+	}
+
+	/** 获取代理对象，通过修改其属性来触发事件 */
+	getData(): T {
+		return this.data;
+	}
+
+	/** 监听属性变化事件*/
+	on<K extends keyof T>(key: K, handler: Handler<T[K]>): void {
+		this.emitter.on(key, handler);
+	}
+
+	/** 移除属性变化事件监听*/
+	off<K extends keyof T>(key: K, handler?: Handler<T[K]>): void {
+		this.emitter.off(key, handler);
+	}
+
+	/**销毁观察者，清空所有事件监听 */
+	destroy(): void {
+		this.emitter.destroy();
+	}
+}
