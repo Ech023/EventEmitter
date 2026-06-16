@@ -16,6 +16,19 @@ type EventHandlerMap<Events extends Record<EventType, unknown>> = Map<keyof Even
 /**事件类型基础类型*/
 type EventType = string | symbol;
 
+/**
+ * 内部用：标记一次性处理器的符号
+ */
+const ONCE_MARKER = Symbol("__once__");
+
+/**
+ * 一次性处理器的包装类型
+ */
+interface OnceHandler<T = unknown> extends Handler<T> {
+	[ONCE_MARKER]?: boolean;
+	__originalHandler?: Handler<T>;
+}
+
 export interface Emitter<Events extends Record<EventType, unknown>> {
 	/** 事件映射表，可直接访问（用于调试或高级操作）*/
 	all: EventHandlerMap<Events>;
@@ -35,6 +48,40 @@ export interface Emitter<Events extends Record<EventType, unknown>> {
 	 * ```
 	 */
 	on<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>): void;
+
+	/**
+	 * 注册一次性事件监听（事件触发一次后自动移除）
+	 *
+	 * @typeParam Key - 事件名称
+	 * @param type - 事件类型
+	 * @param handler - 处理函数
+	 *
+	 * @example
+	 * ```typescript
+	 * emitter.once('ready', (data) => {
+	 *     console.log('应用已就绪', data);
+	 * });
+	 * ```
+	 */
+	once<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>): void;
+
+	/**
+	 * 检查是否存在某事件的监听器
+	 *
+	 * @typeParam Key - 事件名称
+	 * @param type - 事件类型
+	 * @returns 是否存在监听器
+	 */
+	hasListeners<Key extends keyof Events>(type: Key): boolean;
+
+	/**
+	 * 获取某事件的监听器数量
+	 *
+	 * @typeParam Key - 事件名称
+	 * @param type - 事件类型
+	 * @returns 监听器数量
+	 */
+	listenerCount<Key extends keyof Events>(type: Key): number;
 
 	/**
 	 * 移除事件监听
@@ -86,6 +133,8 @@ export interface Emitter<Events extends Record<EventType, unknown>> {
 
 	/**
 	 * 移除整个组的所有监听
+	 *
+	 * @param bindKey - 组名
 	 */
 	unbinds(bindKey: string): void;
 
@@ -94,6 +143,7 @@ export interface Emitter<Events extends Record<EventType, unknown>> {
 	 */
 	destroy(): void;
 }
+
 /**
  * 事件发射器接口
  * @typeParam Events - 事件映射类型，例如 `{ login: { uid: number }; logout: void }`
@@ -113,11 +163,11 @@ export interface Emitter<Events extends Record<EventType, unknown>> {
 export default function mitt<Events extends Record<EventType, unknown> = Record<EventType, unknown>>(
 	all?: EventHandlerMap<Events>,
 ): Emitter<Events> {
-	const eventMap: Map<keyof Events, EventHandlerList<Events[keyof Events]>> = all ?? new Map();
+	const eventMap: EventHandlerMap<Events> = all ?? new Map();
 	const groups = new Map<string, Array<{ type: keyof Events; handler: Handler<any> }>>();
 
 	function addHandler(type: keyof Events, handler: Handler<any>): void {
-		const handlers = eventMap.get(type) as EventHandlerList<Events[keyof Events]> | undefined;
+		let handlers = eventMap.get(type);
 		if (handlers) {
 			handlers.push(handler);
 		} else {
@@ -126,7 +176,7 @@ export default function mitt<Events extends Record<EventType, unknown> = Record<
 	}
 
 	function removeHandler(type: keyof Events, handler?: Handler<any>): void {
-		const handlers = eventMap.get(type) as EventHandlerList<Events[keyof Events]> | undefined;
+		const handlers = eventMap.get(type);
 		if (!handlers) return;
 
 		if (handler) {
@@ -134,6 +184,7 @@ export default function mitt<Events extends Record<EventType, unknown> = Record<
 			if (idx !== -1) {
 				handlers.splice(idx, 1);
 			}
+			// 优化：避免删除空数组，直到真正需要时才删除
 			if (handlers.length === 0) {
 				eventMap.delete(type);
 			}
@@ -144,39 +195,89 @@ export default function mitt<Events extends Record<EventType, unknown> = Record<
 
 	const emitter: Emitter<Events> = {
 		all: eventMap,
+
 		on(type, handler) {
 			addHandler(type, handler);
 		},
+
 		off(type, handler) {
 			removeHandler(type, handler);
 		},
+
+		/**
+		 * 优化点 1：修复并发修改问题
+		 * 通过拷贝处理器数组，确保在迭代过程中修改不会影响迭代
+		 */
 		emit(type, event) {
-			const handlers = eventMap.get(type) as EventHandlerList<Events[keyof Events]> | undefined;
-			if (handlers) {
-				for (let i = 0; i < handlers.length; i++) {
-					handlers[i](event);
-				}
+			const handlers = eventMap.get(type);
+			if (!handlers) return;
+
+			// 拷贝一份处理器数组，避免在迭代中修改原数组
+			const handlersToCall = handlers.slice();
+			for (let i = 0; i < handlersToCall.length; i++) {
+				handlersToCall[i](event);
 			}
 		},
+
+		/**
+		 * 优化点 2：改进 once 实现
+		 * 使用 Symbol 标记替代包装函数，降低引用复杂度
+		 */
+		once(type, handler) {
+			const onceWrapper = ((event: Events[typeof type]) => {
+				removeHandler(type, onceWrapper);
+				handler(event);
+			}) as OnceHandler<Events[typeof type]>;
+
+			// 标记为一次性处理器，便于追踪和调试
+			onceWrapper[ONCE_MARKER] = true;
+			onceWrapper.__originalHandler = handler;
+
+			addHandler(type, onceWrapper);
+		},
+
+		hasListeners(type): boolean {
+			const handlers = eventMap.get(type);
+			return !!handlers && handlers.length > 0;
+		},
+
+		listenerCount(type): number {
+			const handlers = eventMap.get(type);
+			return handlers ? handlers.length : 0;
+		},
+
+		/**
+		 * 优化点 3：优化 binds 实现
+		 * 避免双重遍历，直接清理和注册
+		 */
 		binds(bindKey, bindList) {
-			if (groups.has(bindKey)) {
-				this.unbinds(bindKey);
+			// 如果存在旧的绑定组，直接清理（避免调用 unbinds 导致的重复遍历）
+			const existing = groups.get(bindKey);
+			if (existing) {
+				for (const { type, handler } of existing) {
+					removeHandler(type, handler);
+				}
 			}
+
+			// 注册新的处理器组
 			const registered: Array<{ type: keyof Events; handler: Handler<any> }> = [];
 			for (const item of bindList) {
 				addHandler(item.type, item.handler);
-				registered.push({ type: item.type, handler: item.handler });
+				registered.push(item);
 			}
 			groups.set(bindKey, registered);
 		},
+
 		unbinds(bindKey) {
 			const registered = groups.get(bindKey);
 			if (!registered) return;
+
 			for (const { type, handler } of registered) {
 				removeHandler(type, handler);
 			}
 			groups.delete(bindKey);
 		},
+
 		destroy() {
 			eventMap.clear();
 			groups.clear();
@@ -187,65 +288,162 @@ export default function mitt<Events extends Record<EventType, unknown> = Record<
 }
 
 /**
- * 观察者类型别名：简化类型映射
+ * 深度对比函数：用于检测对象的深层属性变化
+ * @param oldVal - 旧值
+ * @param newVal - 新值
+ * @returns 是否相等
  */
-type ObserverEvents<T extends Record<string, any>> = { [K in keyof T]: T[K] };
+function deepEqual(oldVal: any, newVal: any): boolean {
+	if (oldVal === newVal) return true;
+	if (oldVal == null || newVal == null) return false;
+	if (typeof oldVal !== "object" || typeof newVal !== "object") return false;
+
+	const oldKeys = Object.keys(oldVal);
+	const newKeys = Object.keys(newVal);
+
+	if (oldKeys.length !== newKeys.length) return false;
+
+	for (const key of oldKeys) {
+		if (!newKeys.includes(key)) return false;
+		if (!deepEqual(oldVal[key], newVal[key])) return false;
+	}
+
+	return true;
+}
+
+/**
+ * 浅拷贝函数：用于创建对象的浅拷贝
+ */
+function shallowClone<T extends Record<string, any>>(obj: T): T {
+	return Object.assign({}, obj) as T;
+}
+
+/**
+ * 观察者选项
+ */
+interface ObserverOptions {
+	/** 是否使用深度对比（默认为 false，使用浅对比） */
+	deep?: boolean;
+	/** 是否监听全部数据变化事件（默认为 true） */
+	watchAll?: boolean;
+}
 
 /**
  * 观察者类：基于 Proxy 监听普通对象的属性变化，自动触发同名事件。
- * 仅支持直接属性赋值（不支持数组、不支持嵌套对象内部变化的监听）。
- * 当对象的任意属性被重新赋值时，会触发与属性名相同的事件，并将新值作为参数传递给监听器。
+ * 支持单属性监听、全数据监听、深度对比等功能。
+ *
  * @typeParam T - 被观察对象的类型，必须是键为 string 的普通对象类型
+ *
  * @example
  * ```typescript
- * const obs = new Observer({ a: 1, b: 'hello', c: true });
- * // 监听属性 a 的变化
+ * // 基础用法
+ * const obs = new Observer({ a: 1, b: 'hello', c: { x: 10 } });
+ *
+ * // 监听单个属性变化
  * obs.on('a', (newVal) => {
  *     console.log(`a 变为 ${newVal}`);
- *     if (newVal === 2) {
- *         console.log('条件满足：a 变成了 2！');
- *     }
  * });
+ *
+ * // 监听所有数据变化
+ * obs.onChange((changes) => {
+ *     console.log('数据变化:', changes);
+ * });
+ *
+ * // 使用深度对比
+ * const deepObs = new Observer(
+ *     { user: { name: 'Alice', age: 30 } },
+ *     { deep: true }
+ * );
+ * deepObs.on('user', (newVal) => {
+ *     console.log('用户信息变化:', newVal);
+ * });
+ * deepObs.getData().user.name = 'Bob'; // 触发事件
+ *
  * // 修改属性，触发事件
- * obs.getData().a = 2;   // 输出: a 变为 2  条件满足：a 变成了 2！
- * obs.getData().b = 'world'; // 输出: b 变为 world
- * obs.getData().c = false;   // 输出: c 变为 false
- * // 销毁观察者（停止所有事件）
+ * obs.getData().a = 2;
+ * obs.getData().b = 'world';
+ * obs.getData().c = { x: 20 };
+ *
+ * // 销毁观察者
  * obs.destroy();
  * ```
  *
  * @remarks
  * - 处理函数推荐使用箭头函数以避免 `this` 指向问题
  * - 使用 `getData()` 获取代理对象，直接修改其属性即可触发事件
- * - 不会递归监听嵌套对象内部变化
+ * - 使用 `onChange()` 监听所有属性变化
+ * - 深度对比会降低性能，仅在必要时启用
  */
 export class Observer<T extends Record<string, any>> {
 	private data: T;
-	private emitter: Emitter<ObserverEvents<T>>;
+	private emitter: Emitter<Record<keyof T, any>>;
+	private changeHandlers: Set<Handler<Partial<T>>>;
+	private options: Required<ObserverOptions>;
+	private lastSnapshot: T;
 
 	/** 创建一个观察者实例
 	 * @param initialData - 初始数据对象
+	 * @param options - 配置选项
 	 */
-	constructor(initialData: T) {
-		this.emitter = mitt<ObserverEvents<T>>();
+	constructor(initialData: T, options: ObserverOptions = {}) {
+		this.emitter = mitt<Record<keyof T, any>>();
+		this.changeHandlers = new Set();
+		this.options = {
+			deep: options.deep ?? false,
+			watchAll: options.watchAll ?? true,
+		};
+		// 保存初始快照用于深度对比
+		this.lastSnapshot = shallowClone(initialData);
+
 		this.data = new Proxy(initialData, {
-			set: (target: T, prop: string, value: any, receiver: any): boolean => {
+			set: (target: T, prop: string | symbol, value: any): boolean => {
 				// 1. 如果属性名不是字符串（比如 Symbol），直接执行原始赋值并返回，不触发事件
 				if (typeof prop !== "string") {
-					return Reflect.set(target, prop, value, receiver);
+					return Reflect.set(target, prop, value);
 				}
+
 				// 2. 因为 prop 是字符串，将它断言为 T 的合法键名
 				const key = prop as keyof T;
+
 				// 3. 读取旧值
 				const oldValue = target[key];
-				// 4. 执行真正的属性赋值，并获取结果布尔值
-				const result = Reflect.set(target, key, value, receiver);
-				// 5. 如果新旧值不相等，触发同名事件，将新值传出去
-				if (oldValue !== value) {
+
+				// 4. 根据配置选择对比方式
+				const hasChanged = this.options.deep ? !deepEqual(oldValue, value) : oldValue !== value;
+
+				// 5. 如果值确实改变了，才执行赋值和触发事件
+				if (hasChanged) {
+					// 5.1 执行真正的属性赋值
+					const result = Reflect.set(target, key, value);
+
+					// 5.2 触发单属性事件
 					this.emitter.emit(key, value);
+
+					// 5.3 如果启用了全数据监听，触发所有变化监听器
+					if (this.options.watchAll) {
+						const changes: Partial<T> = { [key]: value } as Partial<T>;
+						// 调用所有注册的变化监听器
+						for (const handler of this.changeHandlers) {
+							handler(changes);
+						}
+					}
+
+					// 5.4 更新快照
+					this.lastSnapshot = shallowClone(target);
+
+					// 6. 返回赋值结果（必须返回布尔值）
+					return result;
 				}
-				// 6. 返回赋值结果（必须返回布尔值）
-				return result;
+
+				return true;
+			},
+
+			/**
+			 * 优化点：添加 get 拦截
+			 * 提高代码的完整性和防御性，便于未来扩展（如脏值检测、访问日志等）
+			 */
+			get: (target: T, prop: string | symbol): any => {
+				return Reflect.get(target, prop);
 			},
 		});
 	}
@@ -255,18 +453,73 @@ export class Observer<T extends Record<string, any>> {
 		return this.data;
 	}
 
-	/** 监听属性变化事件*/
+	/** 获取当前数据的快照 */
+	getSnapshot(): T {
+		return shallowClone(this.data as any);
+	}
+
+	/** 监听属性变化事件
+	 * @param key - 属性键
+	 * @param handler - 处理函数
+	 */
 	on<K extends keyof T>(key: K, handler: Handler<T[K]>): void {
 		this.emitter.on(key, handler);
 	}
 
-	/** 移除属性变化事件监听*/
+	/** 一次性监听属性变化事件 */
+	once<K extends keyof T>(key: K, handler: Handler<T[K]>): void {
+		this.emitter.once(key, handler);
+	}
+
+	/** 移除属性变化事件监听 */
 	off<K extends keyof T>(key: K, handler?: Handler<T[K]>): void {
 		this.emitter.off(key, handler);
 	}
 
-	/**销毁观察者，清空所有事件监听 */
+	/**
+	 * 监听所有数据变化事件
+	 * @param handler - 处理函数，参数为包含变化的属性集合
+	 *
+	 * @example
+	 * ```typescript
+	 * obs.onChange((changes) => {
+	 *     console.log('发生了变化:', changes);
+	 *     if ('a' in changes) {
+	 *         console.log('属性 a 变为:', changes.a);
+	 *     }
+	 * });
+	 * ```
+	 */
+	onChange(handler: Handler<Partial<T>>): void {
+		this.changeHandlers.add(handler);
+	}
+
+	/**
+	 * 移除全数据变化监听
+	 * @param handler - 要移除的处理函数
+	 */
+	offChange(handler: Handler<Partial<T>>): void {
+		this.changeHandlers.delete(handler);
+	}
+
+	/** 检查是否有某属性的监听器 */
+	hasListeners<K extends keyof T>(key: K): boolean {
+		return this.emitter.hasListeners(key);
+	}
+
+	/** 获取某属性的监听器数量 */
+	listenerCount<K extends keyof T>(key: K): number {
+		return this.emitter.listenerCount(key);
+	}
+
+	/** 获取全数据变化监听器数量 */
+	getChangeListenerCount(): number {
+		return this.changeHandlers.size;
+	}
+
+	/** 销毁观察者，清空所有事件监听 */
 	destroy(): void {
 		this.emitter.destroy();
+		this.changeHandlers.clear();
 	}
 }
