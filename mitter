@@ -1,525 +1,294 @@
 /**
- * 事件处理函数：接收一个事件参数，无返回值
- * @remarks 为避免 this 指向问题，推荐使用箭头函数或手动 bind
+ * 合法事件键类型：字符串 / Symbol
  */
-type Handler<T = unknown> = (event: T) => void;
-
-/**某个事件类型对应的处理函数数组*/
-type EventHandlerList<T = unknown> = Array<Handler<T>>;
+export type EventType = string | symbol;
 
 /**
- * 事件映射表：每个事件类型映射到一个处理函数数组
- * @typeParam Events - 事件映射类型，键为事件名，值为事件参数类型
+ * 事件处理函数
+ * @template T 事件负载类型
  */
-type EventHandlerMap<Events extends Record<EventType, unknown>> = Map<keyof Events, EventHandlerList<Events[keyof Events]>>;
-
-/**事件类型基础类型*/
-type EventType = string | symbol;
+export type Handler<T = unknown> = (event: T) => void;
 
 /**
- * 内部用：标记一次性处理器的符号
+ * 单一事件对应的回调数组
+ * @template T 事件负载类型
  */
-const ONCE_MARKER = Symbol("__once__");
+export type EventHandlerList<T = unknown> = Array<Handler<T>>;
 
 /**
- * 一次性处理器的包装类型
+ * 全局事件存储Map
+ * key: 事件名
+ * value: 对应事件回调列表
+ * @template Events 事件映射约束 {事件名: 负载类型}
  */
-interface OnceHandler<T = unknown> extends Handler<T> {
-	[ONCE_MARKER]?: boolean;
-	__originalHandler?: Handler<T>;
-}
+export type EventHandlerMap<Events extends Record<EventType, unknown>> = Map<keyof Events, EventHandlerList<unknown>>;
 
+/**
+ * 事件分组存储项（统一内部存储为unknown消除联合类型冲突）
+ */
+type GroupItem<Events extends Record<EventType, unknown>> = {
+	type: keyof Events;
+	handler: Handler<unknown>;
+};
+
+/**
+ * 事件发射器标准接口
+ * @template Events 事件类型约束映射
+ */
 export interface Emitter<Events extends Record<EventType, unknown>> {
-	/** 事件映射表，可直接访问（用于调试或高级操作）*/
-	all: EventHandlerMap<Events>;
+	/** 只读原始事件存储Map */
+	readonly all: EventHandlerMap<Events>;
 
 	/**
-	 * 注册事件监听
-	 *
-	 * @typeParam Key - 事件名称（必须是 Events 的键）
-	 * @param type - 事件类型
-	 * @param handler - 处理函数（推荐使用箭头函数以避免 this 问题）
-	 *
-	 * @example
-	 * ```typescript
-	 * emitter.on('userLogin', (data) => {
-	 *     console.log(data.name);
-	 * });
-	 * ```
+	 * 注册普通事件监听
+	 * @param type 事件名称
+	 * @param handler 事件回调
+	 * @returns 取消当前监听的函数
 	 */
 	on<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>): void;
 
 	/**
-	 * 注册一次性事件监听（事件触发一次后自动移除）
-	 *
-	 * @typeParam Key - 事件名称
-	 * @param type - 事件类型
-	 * @param handler - 处理函数
-	 *
-	 * @example
-	 * ```typescript
-	 * emitter.once('ready', (data) => {
-	 *     console.log('应用已就绪', data);
-	 * });
-	 * ```
+	 * 一次性事件监听，触发一次后自动解绑
+	 * @param type 事件名称
+	 * @param handler 事件回调
+	 * @returns 取消当前监听的函数
 	 */
 	once<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>): void;
 
 	/**
-	 * 检查是否存在某事件的监听器
-	 *
-	 * @typeParam Key - 事件名称
-	 * @param type - 事件类型
-	 * @returns 是否存在监听器
-	 */
-	hasListeners<Key extends keyof Events>(type: Key): boolean;
-
-	/**
-	 * 获取某事件的监听器数量
-	 *
-	 * @typeParam Key - 事件名称
-	 * @param type - 事件类型
-	 * @returns 监听器数量
-	 */
-	listenerCount<Key extends keyof Events>(type: Key): number;
-
-	/**
-	 * 移除事件监听
-	 *
-	 * @typeParam Key - 事件名称
-	 * @param type - 事件类型
-	 * @param handler - 可选，指定要移除的处理函数；不传则移除该类型的所有监听
-	 *
-	 * @example
-	 * ```typescript
-	 * // 移除特定处理函数
-	 * emitter.off('userLogin', loginHandler);
-	 * // 移除所有 'userLogin' 监听
-	 * emitter.off('userLogin');
-	 * ```
+	 * 移除指定事件监听
+	 * @param type 事件名称
+	 * @param handler 不传则清空该事件所有回调
 	 */
 	off<Key extends keyof Events>(type: Key, handler?: Handler<Events[Key]>): void;
 
 	/**
-	 * 触发事件
-	 *
-	 * @typeParam Key - 事件名称
-	 * @param type - 事件类型
-	 * @param event - 事件数据（必须与事件类型匹配）
-	 *
-	 * @example
-	 * ```typescript
-	 * emitter.emit('userLogin', { uid: 1, name: 'Alice' });
-	 * emitter.emit('userLogout', undefined);
-	 * ```
+	 * 触发事件（携带负载）
+	 * @param type 事件名称
+	 * @param event 事件负载数据
 	 */
 	emit<Key extends keyof Events>(type: Key, event: Events[Key]): void;
 
 	/**
-	 * 批量注册一组事件监听（按组管理，便于统一移除）
-	 *
-	 * @param bindKey - 组名，用于后续移除
-	 * @param handlers - 处理函数数组，每个元素包含事件类型和处理函数
-	 *
-	 * @example
-	 * ```typescript
-	 * emitter.binds('auth', [
-	 *     { type: 'userLogin', handler: (data) => console.log(data.name) },
-	 *     { type: 'userLogout', handler: () => console.log('logged out') }
-	 * ]);
-	 * ```
+	 * 无参触发事件重载
+	 * 仅当事件负载允许 undefined 时可用
+	 * @param type 事件名称
 	 */
-	binds(bindKey: string, handlers: Array<{ type: keyof Events; handler: Handler<any> }>): void;
+	emit<Key extends keyof Events>(type: undefined extends Events[Key] ? Key : never): void;
 
 	/**
-	 * 移除整个组的所有监听
-	 *
-	 * @param bindKey - 组名
+	 * 获取事件有效监听器数量（过滤派发中占位undefined）
+	 * @param type 事件名称
+	 */
+	listeners<Key extends keyof Events>(type: Key): number;
+
+	/**
+	 * 判断事件是否存在有效监听器
+	 * @param type 事件名称
+	 */
+	hasListeners<Key extends keyof Events>(type: Key): boolean;
+
+	/**
+	 * 批量绑定一组事件，支持分组统一解绑
+	 * @param bindKey 分组唯一标识
+	 * @param handlers 批量事件配置列表
+	 * @returns 解绑当前分组所有事件的函数
+	 */
+	binds<Key extends keyof Events>(bindKey: string, handlers: Array<{ type: Key; handler: Handler<Events[Key]> }>): void;
+
+	/**
+	 * 解绑指定分组下全部事件监听
+	 * @param bindKey 分组唯一标识
 	 */
 	unbinds(bindKey: string): void;
 
 	/**
-	 * 销毁所有事件监听，清空映射表和组记录
+	 * 清空全部事件监听（保留Map实例）
+	 */
+	clear(): void;
+
+	/**
+	 * 销毁实例，清空所有数据与分组
 	 */
 	destroy(): void;
 }
 
 /**
- * 事件发射器接口
- * @typeParam Events - 事件映射类型，例如 `{ login: { uid: number }; logout: void }`
+ * 创建轻量事件发射器实例
+ * @param all 外部传入共享事件Map，可选
+ * @returns Emitter 事件发射器
+ * @example
  * @example
  * ```typescript
- * interface IAppEvents {
- *   userLogin: { uid: number; name: string };
- *   userLogout: undefined;
- *   dataLoaded: string[];
- * }
- * const emitter = mitt<IAppEvents>();
- * emitter.on('userLogin', (data) => console.log(data.uid));
- * emitter.emit('userLogin', { uid: 123, name: 'Bob' });
- * emitter.emit('userLogout', undefined);
+//不初始化注册类型
+const emitter = mitt()
+// listen to an event
+emitter.on('foo', e => console.log('foo', e) )
+// listen to all events
+emitter.on('*', (type, e) => console.log(type, e) )
+// fire an event
+emitter.emit('foo', { a: 'b' })
+// clearing all events
+emitter.all.clear()
+// working with handler references:
+function onFoo() {}
+emitter.on('foo', onFoo)   // listen
+emitter.off('foo', onFoo)  // unlisten
+
+//初始化注册类型
+type Events = {
+  foo: string;
+  bar?: number;
+};
+const emitter = mitt<Events>(); // inferred as Emitter<Events>
+emitter.on('foo', (e) => {}); // 'e' has inferred type 'string'
+emitter.emit('foo', 42); // Error: Argument of type 'number' is not assignable to parameter of type 'string'. (2345)
+
  * ```
  */
-export default function mitt<Events extends Record<EventType, unknown> = Record<EventType, unknown>>(
-	all?: EventHandlerMap<Events>,
-): Emitter<Events> {
+export function mitt<Events extends Record<EventType, unknown>>(all?: EventHandlerMap<Events>): Emitter<Events> {
+	// 事件存储容器，统一内部存储 Handler<unknown> 规避联合类型冲突
 	const eventMap: EventHandlerMap<Events> = all ?? new Map();
-	const groups = new Map<string, Array<{ type: keyof Events; handler: Handler<any> }>>();
+	// 事件分组存储：key=分组标识，value=绑定事件列表
+	const groups = new Map<string, GroupItem<Events>[]>();
+	// 标记当前是否正在派发事件（防止遍历中splice导致数组错乱）
+	const isDispatching = new Map<keyof Events, boolean>();
 
-	function addHandler(type: keyof Events, handler: Handler<any>): void {
+	/**
+	 * 获取指定事件的回调数组，不存在则自动创建空数组
+	 * @param type 事件名
+	 * @returns 当前事件回调列表
+	 */
+	const getHandlers = <K extends keyof Events>(type: K): Handler<unknown>[] => {
 		let handlers = eventMap.get(type);
-		if (handlers) {
-			handlers.push(handler);
-		} else {
-			eventMap.set(type, [handler]);
+		if (!handlers) {
+			handlers = [];
+			eventMap.set(type, handlers);
 		}
-	}
+		return handlers;
+	};
 
-	function removeHandler(type: keyof Events, handler?: Handler<any>): void {
-		const handlers = eventMap.get(type);
-		if (!handlers) return;
-
-		if (handler) {
-			const idx = handlers.indexOf(handler);
-			if (idx !== -1) {
-				handlers.splice(idx, 1);
-			}
-			// 优化：避免删除空数组，直到真正需要时才删除
+	/**
+	 * 移除单个事件回调，派发中做占位标记而非直接删除
+	 * @param type 事件名
+	 * @param handler 要移除的回调，不传清空整个事件
+	 */
+	const removeHandler = <K extends keyof Events>(type: K, handler?: Handler<Events[K]>) => {
+		const handlers = getHandlers(type);
+		if (!handler) {
+			eventMap.delete(type);
+			return;
+		}
+		const target = handler as Handler<unknown>;
+		const idx = handlers.indexOf(target);
+		if (idx === -1) return;
+		if (isDispatching.get(type)) {
+			handlers[idx] = undefined as any;
+		} else {
+			handlers.splice(idx, 1);
 			if (handlers.length === 0) {
 				eventMap.delete(type);
 			}
-		} else {
+		}
+	};
+
+	/**
+	 * 派发完成后清理数组中undefined占位，删除空事件key
+	 * @param type 事件名
+	 */
+	const cleanupDuringDispatch = <K extends keyof Events>(type: K) => {
+		const handlers = eventMap.get(type);
+		if (!handlers) return;
+		let hasValid = false;
+		for (let i = handlers.length - 1; i >= 0; i--) {
+			if (handlers[i] === undefined) {
+				handlers.splice(i, 1);
+			} else {
+				hasValid = true;
+			}
+		}
+		if (!hasValid) {
 			eventMap.delete(type);
 		}
-	}
+	};
 
-	const emitter: Emitter<Events> = {
+	return {
 		all: eventMap,
 
-		on(type, handler) {
-			addHandler(type, handler);
+		on<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>) {
+			getHandlers(type).push(handler as Handler<unknown>);
 		},
 
-		off(type, handler) {
+		once<Key extends keyof Events>(type: Key, handler: Handler<Events[Key]>) {
+			const wrapper: Handler<Events[Key]> = evt => {
+				removeHandler(type, wrapper);
+				handler(evt);
+			};
+			getHandlers(type).push(wrapper as Handler<unknown>);
+		},
+
+		off<Key extends keyof Events>(type: Key, handler?: Handler<Events[Key]>) {
 			removeHandler(type, handler);
 		},
 
-		/**
-		 * 优化点 1：修复并发修改问题
-		 * 通过拷贝处理器数组，确保在迭代过程中修改不会影响迭代
-		 */
-		emit(type, event) {
-			const handlers = eventMap.get(type);
-			if (!handlers) return;
-
-			// 拷贝一份处理器数组，避免在迭代中修改原数组
-			const handlersToCall = handlers.slice();
-			for (let i = 0; i < handlersToCall.length; i++) {
-				handlersToCall[i](event);
-			}
-		},
-
-		/**
-		 * 优化点 2：改进 once 实现
-		 * 使用 Symbol 标记替代包装函数，降低引用复杂度
-		 */
-		once(type, handler) {
-			const onceWrapper = ((event: Events[typeof type]) => {
-				removeHandler(type, onceWrapper);
-				handler(event);
-			}) as OnceHandler<Events[typeof type]>;
-
-			// 标记为一次性处理器，便于追踪和调试
-			onceWrapper[ONCE_MARKER] = true;
-			onceWrapper.__originalHandler = handler;
-
-			addHandler(type, onceWrapper);
-		},
-
-		hasListeners(type): boolean {
-			const handlers = eventMap.get(type);
-			return !!handlers && handlers.length > 0;
-		},
-
-		listenerCount(type): number {
-			const handlers = eventMap.get(type);
-			return handlers ? handlers.length : 0;
-		},
-
-		/**
-		 * 优化点 3：优化 binds 实现
-		 * 避免双重遍历，直接清理和注册
-		 */
-		binds(bindKey, bindList) {
-			// 如果存在旧的绑定组，直接清理（避免调用 unbinds 导致的重复遍历）
-			const existing = groups.get(bindKey);
-			if (existing) {
-				for (const { type, handler } of existing) {
-					removeHandler(type, handler);
+		emit<Key extends keyof Events>(type: Key, evt?: Events[Key]) {
+			const handlers = getHandlers(type);
+			if (handlers.length === 0) return;
+			isDispatching.set(type, true);
+			try {
+				const payload = evt as unknown;
+				for (const handler of handlers) {
+					if (!handler) continue;
+					try {
+						handler(payload);
+					} catch (err) {
+						console.error(`[Emitter] Handler error on event "${String(type)}":`, err);
+					}
 				}
+			} finally {
+				cleanupDuringDispatch(type);
+				isDispatching.delete(type);
 			}
+		},
 
-			// 注册新的处理器组
-			const registered: Array<{ type: keyof Events; handler: Handler<any> }> = [];
+		listeners<Key extends keyof Events>(type: Key) {
+			return getHandlers(type).filter(Boolean).length;
+		},
+
+		hasListeners<Key extends keyof Events>(type: Key) {
+			return this.listeners(type) > 0;
+		},
+
+		binds<Key extends keyof Events>(bindKey: string, bindList: Array<{ type: Key; handler: Handler<Events[Key]> }>) {
+			this.unbinds(bindKey);
+			const registered: GroupItem<Events>[] = [];
 			for (const item of bindList) {
-				addHandler(item.type, item.handler);
-				registered.push(item);
+				const h = item.handler as Handler<unknown>;
+				getHandlers(item.type).push(h);
+				registered.push({
+					type: item.type,
+					handler: h,
+				});
 			}
 			groups.set(bindKey, registered);
 		},
 
-		unbinds(bindKey) {
+		unbinds(bindKey: string) {
 			const registered = groups.get(bindKey);
 			if (!registered) return;
-
 			for (const { type, handler } of registered) {
-				removeHandler(type, handler);
+				removeHandler(type, handler as Handler<Events[keyof Events]>);
 			}
 			groups.delete(bindKey);
 		},
 
-		destroy() {
+		clear() {
 			eventMap.clear();
 			groups.clear();
 		},
+
+		destroy() {
+			this.clear();
+		},
 	};
-
-	return emitter;
-}
-
-/**
- * 深度对比函数：用于检测对象的深层属性变化
- * @param oldVal - 旧值
- * @param newVal - 新值
- * @returns 是否相等
- */
-function deepEqual(oldVal: any, newVal: any): boolean {
-	if (oldVal === newVal) return true;
-	if (oldVal == null || newVal == null) return false;
-	if (typeof oldVal !== "object" || typeof newVal !== "object") return false;
-
-	const oldKeys = Object.keys(oldVal);
-	const newKeys = Object.keys(newVal);
-
-	if (oldKeys.length !== newKeys.length) return false;
-
-	for (const key of oldKeys) {
-		if (!newKeys.includes(key)) return false;
-		if (!deepEqual(oldVal[key], newVal[key])) return false;
-	}
-
-	return true;
-}
-
-/**
- * 浅拷贝函数：用于创建对象的浅拷贝
- */
-function shallowClone<T extends Record<string, any>>(obj: T): T {
-	return Object.assign({}, obj) as T;
-}
-
-/**
- * 观察者选项
- */
-interface ObserverOptions {
-	/** 是否使用深度对比（默认为 false，使用浅对比） */
-	deep?: boolean;
-	/** 是否监听全部数据变化事件（默认为 true） */
-	watchAll?: boolean;
-}
-
-/**
- * 观察者类：基于 Proxy 监听普通对象的属性变化，自动触发同名事件。
- * 支持单属性监听、全数据监听、深度对比等功能。
- *
- * @typeParam T - 被观察对象的类型，必须是键为 string 的普通对象类型
- *
- * @example
- * ```typescript
- * // 基础用法
- * const obs = new Observer({ a: 1, b: 'hello', c: { x: 10 } });
- *
- * // 监听单个属性变化
- * obs.on('a', (newVal) => {
- *     console.log(`a 变为 ${newVal}`);
- * });
- *
- * // 监听所有数据变化
- * obs.onChange((changes) => {
- *     console.log('数据变化:', changes);
- * });
- *
- * // 使用深度对比
- * const deepObs = new Observer(
- *     { user: { name: 'Alice', age: 30 } },
- *     { deep: true }
- * );
- * deepObs.on('user', (newVal) => {
- *     console.log('用户信息变化:', newVal);
- * });
- * deepObs.getData().user.name = 'Bob'; // 触发事件
- *
- * // 修改属性，触发事件
- * obs.getData().a = 2;
- * obs.getData().b = 'world';
- * obs.getData().c = { x: 20 };
- *
- * // 销毁观察者
- * obs.destroy();
- * ```
- *
- * @remarks
- * - 处理函数推荐使用箭头函数以避免 `this` 指向问题
- * - 使用 `getData()` 获取代理对象，直接修改其属性即可触发事件
- * - 使用 `onChange()` 监听所有属性变化
- * - 深度对比会降低性能，仅在必要时启用
- */
-export class Observer<T extends Record<string, any>> {
-	private data: T;
-	private emitter: Emitter<Record<keyof T, any>>;
-	private changeHandlers: Set<Handler<Partial<T>>>;
-	private options: Required<ObserverOptions>;
-	private lastSnapshot: T;
-
-	/** 创建一个观察者实例
-	 * @param initialData - 初始数据对象
-	 * @param options - 配置选项
-	 */
-	constructor(initialData: T, options: ObserverOptions = {}) {
-		this.emitter = mitt<Record<keyof T, any>>();
-		this.changeHandlers = new Set();
-		this.options = {
-			deep: options.deep ?? false,
-			watchAll: options.watchAll ?? true,
-		};
-		// 保存初始快照用于深度对比
-		this.lastSnapshot = shallowClone(initialData);
-
-		this.data = new Proxy(initialData, {
-			set: (target: T, prop: string | symbol, value: any): boolean => {
-				// 1. 如果属性名不是字符串（比如 Symbol），直接执行原始赋值并返回，不触发事件
-				if (typeof prop !== "string") {
-					return Reflect.set(target, prop, value);
-				}
-
-				// 2. 因为 prop 是字符串，将它断言为 T 的合法键名
-				const key = prop as keyof T;
-
-				// 3. 读取旧值
-				const oldValue = target[key];
-
-				// 4. 根据配置选择对比方式
-				const hasChanged = this.options.deep ? !deepEqual(oldValue, value) : oldValue !== value;
-
-				// 5. 如果值确实改变了，才执行赋值和触发事件
-				if (hasChanged) {
-					// 5.1 执行真正的属性赋值
-					const result = Reflect.set(target, key, value);
-
-					// 5.2 触发单属性事件
-					this.emitter.emit(key, value);
-
-					// 5.3 如果启用了全数据监听，触发所有变化监听器
-					if (this.options.watchAll) {
-						const changes: Partial<T> = { [key]: value } as Partial<T>;
-						// 调用所有注册的变化监听器
-						for (const handler of this.changeHandlers) {
-							handler(changes);
-						}
-					}
-
-					// 5.4 更新快照
-					this.lastSnapshot = shallowClone(target);
-
-					// 6. 返回赋值结果（必须返回布尔值）
-					return result;
-				}
-
-				return true;
-			},
-
-			/**
-			 * 优化点：添加 get 拦截
-			 * 提高代码的完整性和防御性，便于未来扩展（如脏值检测、访问日志等）
-			 */
-			get: (target: T, prop: string | symbol): any => {
-				return Reflect.get(target, prop);
-			},
-		});
-	}
-
-	/** 获取代理对象，通过修改其属性来触发事件 */
-	getData(): T {
-		return this.data;
-	}
-
-	/** 获取当前数据的快照 */
-	getSnapshot(): T {
-		return shallowClone(this.data as any);
-	}
-
-	/** 监听属性变化事件
-	 * @param key - 属性键
-	 * @param handler - 处理函数
-	 */
-	on<K extends keyof T>(key: K, handler: Handler<T[K]>): void {
-		this.emitter.on(key, handler);
-	}
-
-	/** 一次性监听属性变化事件 */
-	once<K extends keyof T>(key: K, handler: Handler<T[K]>): void {
-		this.emitter.once(key, handler);
-	}
-
-	/** 移除属性变化事件监听 */
-	off<K extends keyof T>(key: K, handler?: Handler<T[K]>): void {
-		this.emitter.off(key, handler);
-	}
-
-	/**
-	 * 监听所有数据变化事件
-	 * @param handler - 处理函数，参数为包含变化的属性集合
-	 *
-	 * @example
-	 * ```typescript
-	 * obs.onChange((changes) => {
-	 *     console.log('发生了变化:', changes);
-	 *     if ('a' in changes) {
-	 *         console.log('属性 a 变为:', changes.a);
-	 *     }
-	 * });
-	 * ```
-	 */
-	onChange(handler: Handler<Partial<T>>): void {
-		this.changeHandlers.add(handler);
-	}
-
-	/**
-	 * 移除全数据变化监听
-	 * @param handler - 要移除的处理函数
-	 */
-	offChange(handler: Handler<Partial<T>>): void {
-		this.changeHandlers.delete(handler);
-	}
-
-	/** 检查是否有某属性的监听器 */
-	hasListeners<K extends keyof T>(key: K): boolean {
-		return this.emitter.hasListeners(key);
-	}
-
-	/** 获取某属性的监听器数量 */
-	listenerCount<K extends keyof T>(key: K): number {
-		return this.emitter.listenerCount(key);
-	}
-
-	/** 获取全数据变化监听器数量 */
-	getChangeListenerCount(): number {
-		return this.changeHandlers.size;
-	}
-
-	/** 销毁观察者，清空所有事件监听 */
-	destroy(): void {
-		this.emitter.destroy();
-		this.changeHandlers.clear();
-	}
 }
