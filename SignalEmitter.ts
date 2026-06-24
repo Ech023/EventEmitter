@@ -1,178 +1,215 @@
 /**
- * 原生弱引用类型声明（环境无内置WeakRef时兼容补齐）
- */
-interface WeakRef<T extends object> {
-	/**
-	 * 获取弱引用绑定的原始对象
-	 * @returns 对象存在返回实例，已被GC回收返回 undefined
-	 */
-	deref(): T | undefined;
-}
-
-interface WeakRefConstructor {
-	readonly prototype: WeakRef<object>;
-	/**
-	 * 创建对象弱引用
-	 * @param target 仅支持 object 类型，基础类型无法弱引用
-	 */
-	new <T extends object>(target: T): WeakRef<T>;
-}
-
-declare var WeakRef: WeakRefConstructor;
-
-/**
- * 单条监听存储单元
- * @template TArgs 当前信号对应的参数元组类型
+ * 单个监听器存储结构
+ * @template TArgs 当前信号参数元组类型
  */
 interface SignalData<TArgs extends any[]> {
-	/** 信号触发回调函数 */
-	cb: (...args: TArgs) => void;
-	/** 监听上下文弱引用，不阻碍GC回收目标对象 */
-	targetRef: WeakRef<object>;
-	/** 是否一次性监听：true 触发一次自动解绑 */
-	once: boolean;
+	/** 回调执行函数 */
+	readonly cb: (...args: TArgs) => void;
+	/** 监听绑定的目标对象，用于批量解绑 */
+	readonly target: object;
+	/** 是否一次性监听，触发一次后自动移除 */
+	readonly once: boolean;
 }
 
 /**
- * 强类型信号发射器
- * @template T 信号映射表 Record<信号名, 参数元组>
+ * 类型安全信号发射器（事件总线）
+ * 基于 target + cb 唯一标识监听，支持按对象批量解绑、一次性监听
+ * ⚠️局限性 回调函数不要绑定箭头函数 箭头函数的每次都是新的 无法去重
+ *
  * @example
  * type AppSignals = {
- *   login: [number, string],
- *   logout: [],
- *   resize: [number, number]
+ *     login: [userId: number, username: string];
+ *     logout: [];
+ *     resize: [width: number, height: number];
  * };
- * const signalBus = new SignalEmitter<AppSignals>();
+ *
+ * const bus = new SignalEmitter<AppSignals>();
+ *
+ * // 注册常规监听
+ * const unsub = bus.on("login", this, (uid, name) => {
+ *     console.log(uid, name);
+ * });
+ * // 取消单次监听
+ * unsub();
+ *
+ * // 一次性监听
+ * bus.once("logout", this, () => location.reload());
+ *
+ * // 组件销毁批量解绑当前实例所有监听
+ * bus.offAllByTarget(this);
+ *
+ * // 触发信号
+ * bus.emit("login", 1001, "admin");
  */
 export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[]>> {
-	/** 信号存储池 Map<信号名, 当前信号全部监听集合> */
-	private readonly _signalMap = new Map<keyof T, Set<SignalData<any[]>>>();
+	/** 空无操作函数 */
+	private static readonly NOOP = () => void 0;
+
+	/** 信号名 -> 对应监听器集合 */
+	private readonly signalMap = new Map<keyof T, Set<SignalData<any[]>>>();
 
 	/**
-	 * 注册/初始化信号容器
-	 * 不存在该信号则创建空监听集合，已存在无操作
-	 * @param signalKey 信号唯一标识
-	 * @throws {Error} signalKey 为空直接抛出异常
-	 */
-	protected create<K extends keyof T>(signalKey: K): void {
-		if (!signalKey) throw new Error(`信号Key不能为空`);
-		if (!this._signalMap.has(signalKey)) {
-			this._signalMap.set(signalKey, new Set());
-		}
-	}
-
-	/**
-	 * 内部统一绑定逻辑（on / once 复用）
+	 * 内部统一注册监听逻辑
 	 * @param signalKey 信号标识
+	 * @param target 绑定对象
 	 * @param cb 回调函数
-	 * @param target 上下文对象
 	 * @param once 是否一次性监听
-	 * @returns 解绑函数
+	 * @returns 取消订阅函数（幂等，多次调用无副作用）
 	 */
-	private onBind<K extends keyof T>(signalKey: K, cb: (...args: T[K]) => void, target: object, once: boolean = false): () => void {
-		this.create(signalKey);
-		const listenerSet = this._signalMap.get(signalKey)!;
-		const has = Array.from(listenerSet).some(item => {
-			const ctx = item.targetRef.deref();
-			return ctx === target && item.cb === cb;
-		});
-		if (has) {
-			console.warn(`信号[${String(signalKey)}]重复绑定相同监听，已跳过`);
-			return () => void 0;
+	private bind<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void, once: boolean): () => void {
+		// 参数强校验
+		if (typeof signalKey !== "string" || !signalKey) {
+			throw new TypeError("[SignalEmitter] signalKey 必须为有效字符串key");
 		}
-		listenerSet.add({ cb, targetRef: new WeakRef(target), once });
-		return () => this.off(signalKey, cb, target);
+		if (typeof cb !== "function") {
+			throw new TypeError("[SignalEmitter] 监听回调 cb 必须为函数");
+		}
+		if (typeof target !== "object" || !target) {
+			throw new TypeError("[SignalEmitter] target 必须为非 null 对象");
+		}
+		let listenerSet = this.signalMap.get(signalKey);
+		if (!listenerSet) {
+			listenerSet = new Set();
+			this.signalMap.set(signalKey, listenerSet);
+		}
+		// 校验重复监听：同一target+同一cb不重复注册
+		const duplicate = Array.from(listenerSet).some(item => item.target === target && item.cb === cb);
+		if (duplicate) {
+			console.warn(`[SignalEmitter] 重复注册信号监听: ${String(signalKey)}，本次注册已忽略`);
+			return SignalEmitter.NOOP;
+		}
+		const listener: SignalData<T[K]> = { cb, target, once };
+		listenerSet.add(listener);
+		let isUnsubscribed = false;
+		return () => {
+			if (isUnsubscribed) return;
+			isUnsubscribed = true;
+			this.off(signalKey, target, cb);
+		};
 	}
 
 	/**
-	 * 持续监听信号（多次触发）
-	 * @param signalKey 目标信号名称
-	 * @param cb 信号回调函数，参数与泛型定义严格匹配 不要绑定监听函数 监听函数存在无法去重
-	 * @param target 回调this上下文，默认当前SignalEmitter实例
-	 * @returns 解绑函数，调用即可移除本次监听
+	 * 注册常驻监听 ⚠️局限性 回调函数存在多次绑定的话 不要绑定箭头函数 箭头函数的每次都是新的 无法去重
+	 * @param signalKey 信号名称
+	 * @param target 绑定对象（用于批量解绑）
+	 * @param cb 回调函数
+	 * @returns 取消订阅函数
 	 */
-	on<K extends keyof T>(signalKey: K, cb: (...args: T[K]) => void, target: object = this): () => void {
-		return this.onBind(signalKey, cb, target);
+	public on<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void): () => void {
+		return this.bind(signalKey, target, cb, false);
 	}
 
 	/**
-	 * 一次性监听信号，触发一次自动销毁
-	 * @param signalKey 目标信号名称
-	 * @param cb 信号回调函数 不要绑定监听函数  监听函数存在无法去重
-	 * @param target 回调this上下文，默认当前实例
-	 * @returns 解绑函数，可提前手动取消监听
+	 * 注册一次性监听，触发一次后自动解绑 ⚠️局限性 回调函数不要绑定箭头函数 箭头函数的每次都是新的 无法去重
+	 * @param signalKey 信号名称
+	 * @param target 绑定对象
+	 * @param cb 回调函数
+	 * @returns 取消订阅函数
 	 */
-	once<K extends keyof T>(signalKey: K, cb: (...args: T[K]) => void, target: object = this): () => void {
-		return this.onBind(signalKey, cb, target, true);
+	public once<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void): () => void {
+		return this.bind(signalKey, target, cb, true);
 	}
 
 	/**
-	 * 手动移除单条监听
-	 * 根据回调函数+上下文对象精准匹配删除
-	 * @param signalKey 目标信号名称
-	 * @param cb 绑定的回调函数引用
-	 * @param target 绑定的上下文对象，默认当前实例
+	 * 移除指定信号下 target + cb 匹配的单个监听
+	 * @param signalKey 信号名称
+	 * @param target 绑定对象
+	 * @param cb 注册时传入的回调函数
 	 */
-	off<K extends keyof T>(signalKey: K, cb: (...args: T[K]) => void, target: object = this): void {
-		const listenerSet = this._signalMap.get(signalKey);
+	public off<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void): void {
+		const listenerSet = this.signalMap.get(signalKey);
 		if (!listenerSet) return;
-		const snapshot = Array.from(listenerSet);
-		for (const item of snapshot) {
-			const ctx = item.targetRef.deref();
-			if (ctx === target && item.cb === cb) {
+		for (const item of listenerSet) {
+			if (item.target === target && item.cb === cb) {
 				listenerSet.delete(item);
+				if (listenerSet.size === 0) {
+					this.signalMap.delete(signalKey);
+				}
 				break;
 			}
 		}
-		if (listenerSet.size === 0) {
-			this._signalMap.delete(signalKey);
-			return;
+	}
+
+	/**
+	 * 批量移除指定 target 对象绑定的所有信号监听
+	 * @param target 绑定对象
+	 */
+	public offAllByTarget(target: object): void {
+		const signalEntries = Array.from(this.signalMap.entries());
+		for (const [signalKey, listenerSet] of signalEntries) {
+			const toRemove: SignalData<any[]>[] = [];
+			for (const item of listenerSet) {
+				if (item.target === target) {
+					toRemove.push(item);
+				}
+			}
+			toRemove.forEach(item => listenerSet.delete(item));
+			if (listenerSet.size === 0) {
+				this.signalMap.delete(signalKey);
+			}
 		}
 	}
 
 	/**
-	 * 发射信号，执行全部有效监听
-	 * 惰性清理：自动移除上下文已被GC回收的失效监听
-	 * 异常隔离：单回调报错不阻塞其余监听执行
-	 * @param signalKey 待发射信号名称
-	 * @param args 信号参数，严格匹配泛型定义元组
+	 * 触发信号，执行所有匹配监听回调
+	 * @param signalKey 信号名称
+	 * @param args 信号携带参数
 	 */
-	emit<K extends keyof T>(signalKey: K, ...args: T[K]): void {
-		const listenerSet = this._signalMap.get(signalKey);
-		if (!listenerSet || listenerSet.size === 0) return;
+	public emit<K extends keyof T>(signalKey: K, ...args: T[K]): void {
+		const listenerSet = this.signalMap.get(signalKey);
+		if (!listenerSet?.size) return;
 		const snapshot = Array.from(listenerSet);
-		let needCleanEmpty = false;
+		const onceToRemove: SignalData<any[]>[] = [];
 		for (const item of snapshot) {
-			const ctx = item.targetRef.deref();
-			if (!ctx) {
-				listenerSet.delete(item);
-				needCleanEmpty = true;
-				continue;
-			}
 			try {
-				item.cb.apply(ctx, args);
-			} catch (err) {
-				console.error(`信号[${String(signalKey)}]回调执行异常：`, err);
+				item.cb(...args);
+			} catch (error) {
+				console.error(`[SignalEmitter] 信号【${String(signalKey)}】回调执行异常：`, error);
 			}
 			if (item.once) {
-				listenerSet.delete(item);
-				needCleanEmpty = true;
+				onceToRemove.push(item);
 			}
 		}
-		if (needCleanEmpty && listenerSet.size === 0) {
-			this._signalMap.delete(signalKey);
+		for (const item of onceToRemove) {
+			listenerSet.delete(item);
+		}
+		if (listenerSet.size === 0) {
+			this.signalMap.delete(signalKey);
 		}
 	}
 
 	/**
-	 * 清空发射器全部信号监听
-	 * @param signalKey 传入信号名仅清空该信号；不传则清空全部信号池
+	 * 判断指定信号是否存在监听
+	 * @param signalKey 信号名称
 	 */
-	clear(signalKey?: keyof T): void {
-		if (signalKey) {
-			this._signalMap.delete(signalKey);
-		} else {
-			this._signalMap.clear();
+	public has<K extends keyof T>(signalKey: K): boolean {
+		return (this.signalMap.get(signalKey)?.size ?? 0) > 0;
+	}
+
+	/**
+	 * 获取指定信号当前监听数量
+	 * @param signalKey 信号名称
+	 */
+	public count<K extends keyof T>(signalKey: K): number {
+		return this.signalMap.get(signalKey)?.size ?? 0;
+	}
+
+	/**
+	 * 清空监听
+	 * @param signalKey 传入信号名则仅清空该信号，不传则清空全部信号
+	 */
+	public clear(signalKey?: keyof T): void {
+		if (signalKey !== undefined) {
+			this.signalMap.delete(signalKey);
+			return;
 		}
+		this.signalMap.clear();
+	}
+
+	/**
+	 * 实例销毁：清空所有监听，释放全部引用
+	 */
+	public destroy(): void {
+		this.signalMap.clear();
 	}
 }
