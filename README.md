@@ -1,265 +1,293 @@
-# EventEmit - 事件与观察者工具
+# EventEmitter - 事件与观察者系统
 
-基于 Cocos Creator 事件系统设计思想，核心语法基于 ES6（ECMAScript 2015），但外层使用了 TypeScript 类型系统，提供灵活的事件监听/派发机制，并拓展了批量分组注册/移除功能，同时内置响应式数据观察者（Observer），实现数据变更的自动监听，和能够通过接口智能提示的相关注册派发的事件(TypedEventListen)
+## 简介
 
-## 概述
+EventEmitter 是一个基于 **Godot Signal（信号机制）设计思想** 扩展出来的 TypeScript 事件通信框架。
 
-事件系统提供三个核心类：
+参考 Godot Engine 中：
 
-- **EventListen**：基础事件总线（订阅/发布/批量管理）
-- **Observer**：响应式数据观察者（基于 EventListen）
-- **TypedEventListen**：类型安全的事件总线（泛型约束）
+- Signal 信号连接
+- emit 发射
+- connect 监听
+- disconnect 移除
 
-所有事件回调均**异步执行**（微任务），支持自动绑定 `this`、一次性监听、批量分组、深度比较等特性。
+的设计理念，在 JavaScript / TypeScript 环境中实现了一套：
+
+- 类型安全事件系统
+- 响应式数据观察
+- 自动生命周期管理
+- 批量监听解绑
+
+适用于：
+
+- Cocos Creator
+- Web 游戏
+- 前端应用
+- Node.js
+- TypeScript 项目
 
 ---
 
-## 1. EventListen
+# 核心模块
 
-基础事件类，实现事件的订阅、发布、取消、批量管理。
+包含三个主要组件：
 
-### 构造函数
+## 1. SignalEmitter
 
-```typescript
-new EventListen();
+基础事件总线。
+
+功能：
+
+- on 注册监听
+- once 一次监听
+- off 移除监听
+- emit 发送事件
+- target 批量解绑
+
+示例：
+
+```ts
+const bus = new SignalEmitter();
+bus.on("login", this, id => {
+	console.log(id);
+});
+bus.emit("login", 1001);
 ```
 
-### 方法
+---
 
-#### on(eventKey, callback, target?, batchKey?)
+# 2. SignalObserver
 
-订阅事件（永久监听）。
+响应式数据观察者。
 
-| 参数     | 类型     | 必填 | 说明                   |
-| -------- | -------- | ---- | ---------------------- |
-| eventKey | string   | 是   | 事件名称               |
-| callback | Function | 是   | 回调函数               |
-| target   | any      | 否   | 绑定 `this` 的对象     |
-| batchKey | string   | 否   | 分组标识，用于批量取消 |
+类似：
 
-```typescript
-const emitter = new EventListen();
-emitter.on("greet", name => console.log(name));
-emitter.on(
-	"click",
-	function () {
-		console.log(this.id);
+- Vue Reactive
+- Godot Property Signal
+
+当数据变化时自动派发事件。
+
+示例：
+
+```ts
+const state = new SignalObserver({
+	hp: 100,
+});
+
+state.watchByKey(
+	"hp",
+	(newValue, oldValue) => {
+		console.log(oldValue, newValue);
 	},
-	{ id: "btn" },
+	this,
 );
+
+state.updateValueByKey("hp", 80);
 ```
 
-#### once(eventKey, callback, target?)
+输出：
 
-订阅一次性事件（触发后自动移除）。
-
-```typescript
-emitter.once("init", () => console.log("只执行一次"));
 ```
 
-#### onBatch(batchKey, events)
+100 -> 80
 
-批量订阅，统一分组。
-
-| 参数     | 类型                                | 说明         |
-| -------- | ----------------------------------- | ------------ |
-| batchKey | string                              | 分组标识     |
-| events   | Array<{eventKey, callback, target}> | 事件配置数组 |
-
-```typescript
-emitter.onBatch("playerGroup", {
-	levelUp: { callback: this.onLevelUp, target: this },
-	death: { callback: this.onDeath, target: this },
-});
 ```
-
-#### offBatch(batchKey)
-
-取消指定分组的所有事件。
-
-#### off(eventKey, callback?, target?)
-
-取消事件订阅。
-
-- 不传 `callback`：移除该事件类型的所有监听
-- 传 `callback` 和可选的 `target`：精确移除匹配的监听
-
-#### targetOff(target)
-
-取消指定对象（`target`）绑定的所有事件。
-
-#### hasListeners(eventKey)
-
-判断是否存在监听器。返回 `boolean`。
-
-#### emit(eventKey, ...args)
-
-发布事件（异步微任务）。参数会传递给回调函数。
-
-```typescript
-emitter.emit("score", 100, "level2");
-```
-
-#### clear()
-
-清空所有事件与队列。
-
-#### getAllListeners()
-
-获取所有监听器快照（只读，用于调试）。
 
 ---
 
-## 2. Observer<T>
+# 3. Typed Signal
 
-响应式数据观察者，继承自 `EventListen`。当通过 `updateValueByKey` 修改属性时，若存在对应监听器，会触发：
+类型安全事件。
 
-- `changeKey_属性名` 事件，参数：`(newValue, oldValue, key)`
-- `changeAll` 事件，参数：`(fullData, newValue, oldValue, key)`
+通过泛型约束事件参数。
 
-> **注意**：只有当 `changeKey_属性名` 存在监听器时，数据才会被实际修改。若无监听，调用 `updateValueByKey` 无效。
+示例：
 
-### 构造函数
+```ts
+type GameEvents = {
+	damage: [number, string];
+};
 
-```typescript
-new Observer<T>(initialData: T)
-```
+const event = new SignalEmitter<GameEvents>();
 
-### 方法
-
-#### getValueByKey(key)
-
-获取指定属性的值（深拷贝副本）。
-
-#### getAllData()
-
-获取完整数据的深拷贝副本。
-
-#### updateValueByKey(key, value, forceEmit?)
-
-设置属性值。`forceEmit` 为 `true` 时强制触发事件（即使值未变）。
-
-```typescript
-state.updateValueByKey("count", 10);
-state.updateValueByKey("count", 10, true); // 强制触发
-```
-
-#### setMultiple(data)
-
-批量设置数据（依次调用 `updateValueByKey`）。
-
-#### watchByKey(key, callback, target?)
-
-监听单个属性变化。
-
-```typescript
-state.watchByKey("count", (newVal, oldVal, key) => {
-	console.log(`${key}: ${oldVal} -> ${newVal}`);
+event.on("damage", event, (damage, name) => {
+	console.log(damage, name);
 });
 ```
 
-#### watchAll(callback, target?)
+错误示例：
 
-监听所有属性变化。
+```ts
+event.emit("damage", "abc");
 
-```typescript
-state.watchAll((fullData, newVal, oldVal, key) => {
-	console.log("数据已更新", fullData);
-});
+// 类型错误
 ```
-
-#### unwatch(key, callback, target?)
-
-取消单个属性监听。
 
 ---
 
-## 3. TypedEventListen<T>
+# 设计特点
 
-类型安全的事件总线，包装 `EventListen`，通过泛型提供事件名和回调参数的智能提示。
+## 1. Signal 思想
 
-### 构造函数
+事件拥有唯一名字：
 
-```typescript
-new TypedEventListen<T>();
+```
+player_dead
+level_complete
+login
 ```
 
-### 使用示例
+监听：
 
-```typescript
-interface MyEvents {
-	click: (x: number, y: number) => void;
-	loaded: (data: string) => void;
+```
+connect
+```
+
+触发：
+
+```
+emit
+```
+
+---
+
+## 2. 生命周期管理
+
+支持：
+
+```ts
+bus.offAllByTarget(this);
+```
+
+组件销毁时自动释放监听。
+
+避免：
+
+- 内存泄漏
+- 重复回调
+
+---
+
+# Observer 数据监听
+
+支持：
+
+## 单属性监听
+
+```ts
+watchByKey("hp", callback);
+```
+
+事件：
+
+```
+changeKey_hp
+```
+
+参数：
+
+```
+(newValue,oldValue, key)
+```
+
+---
+
+## 全局监听
+
+```ts
+watchAll(callback);
+```
+
+参数：
+
+```
+(allData,newValue,oldValue,key)
+```
+
+---
+
+# 特性
+
+| 功能               | 支持 |
+| ------------------ | ---- |
+| TypeScript类型提示 | √    |
+| 事件发布订阅       | √    |
+| 一次性监听         | √    |
+| 批量解绑           | √    |
+| this绑定           | √    |
+| 响应式数据         | √    |
+| 深度比较           | √    |
+| 对象生命周期管理   | √    |
+
+---
+
+# 使用场景
+
+## 游戏开发
+
+例如：
+
+玩家死亡：
+
+```ts
+event.emit("playerDead");
+```
+
+UI监听：
+
+```ts
+event.on("playerDead", this, showGameOver);
+```
+
+---
+
+## 前端状态管理
+
+替代简单：
+
+- EventBus
+- Redux部分场景
+- Vue watch
+
+---
+
+# 注意事项
+
+## 回调引用
+
+不要：
+
+```ts
+bus.on("test", this, () => {});
+```
+
+因为无法使用引用移除。
+
+推荐：
+
+```ts
+private onTest(){
+   let a=5
 }
-
-const bus = new TypedEventListen<MyEvents>();
-
-bus.on("click", (x, y) => console.log(x + y));
-bus.emit("click", 10, 20);
-// bus.emit('click', 'a'); // 类型错误
+bus.on("test",this,this.onTest)
 ```
-
-### 方法（与 EventListen 对应，但参数类型受限）
-
-- `on(eventKey, callback, target?)`
-- `once(eventKey, callback, target?)`
-- `off(eventKey, callback?, target?)`
-- `emit(eventKey, ...args)`
-- `listens(batchKey, events)` —— 批量订阅（原名 `onBatch`，此处命名为 `listens`）
-- `offBatch(batchKey)`
-- `targetOff(target)`
-- `clear()`
-- `hasListeners(eventKey)`
-- `getAllListeners()`
 
 ---
 
-## 注意事项
+# 许可证
 
-1. **异步执行**：所有 `emit` 触发的回调都在微任务中执行，不会同步阻塞。
-2. **自动绑定 this**：通过 `target` 参数传入对象，回调中的 `this` 会自动绑定到该对象。
-3. **深度比较**：`Observer` 的 `_deepEqual` 递归深度默认为 10 层，支持 `Date`、`Map`、`Set`、`RegExp`。
-4. **无监听不修改**：`Observer.updateValueByKey` 仅当存在 `changeKey_xxx` 监听时才实际修改数据，请确保先调用 `watch` 或 `watchAll`。
-5. **分组标识**：`batchKey` 用于批量管理，`onBatch` 注册的事件可通过 `offBatch` 一次性移除。
-6. **内存管理**：使用完记得调用 `targetOff(target)` 或 `clear()` 避免内存泄漏。
+MIT License
 
 ---
 
-## 完整示例
+# 作者说明
 
-```typescript
-import EventEmitter from "./EventEmitter";
+本项目设计思想来源于：
 
-// 1. 基础事件总线
-const bus = new EventEmitter.EventListen();
-const handler = msg => console.log(msg);
-bus.on("log", handler);
-bus.emit("log", "Hello"); // 异步输出
-bus.off("log", handler);
+Godot Engine Signal 信号系统
 
-// 2. 响应式数据
-const state = new EventEmitter.Observer({ count: 0 });
-state.watchByKey("count", (newVal, oldVal) => {
-	console.log(`count: ${oldVal} -> ${newVal}`);
-});
-state.updateValueByKey("count", 5); // 触发 watch
+并结合 TypeScript 泛型能力进行扩展。
 
-// 3. 类型安全总线
-// constTypeBus.ts 全局公共事件定义脚本
-import EventEmitter from "./EventEmitter";
-/**全局公共接口*/
-interface Events {
-	move: (dx: number, dy: number) => void;
-}
-/**导出为公共后可在子模块注册派发*/
-export const typedBus = new EventEmitter.TypedEventListen<Events>();
+目标：
 
-//子模块
-import { typedBus } from "./constTypeBus";
-typedBus.on("move", (dx, dy) => console.log(dx, dy));
-typedBus.emit("move", 10, 20);
-```
-
-## 许可证
-
-MIT
+让复杂项目中的模块通信更加简单、可靠、可维护。
