@@ -18,9 +18,7 @@ interface SignalData<TArgs extends any[]> {
  * @template T 信号映射类型，键为信号名，值为参数元组类型。
  *
  * @remarks
- * **局限性**：回调函数请勿使用箭头函数，因为每次定义都会产生新的函数引用，
- * 导致无法正确去重和移除。
- *
+ * **局限性**：箭头函数或者是内敛函数每次都有可能是新的函数会指向不同的内存，存在无法正确去重和移除。 可能存在多次触发
  * @example
  * ```typescript
  * type AppSignals = {
@@ -31,48 +29,38 @@ interface SignalData<TArgs extends any[]> {
  *
  * const bus = new SignalEmitter<AppSignals>();
  *
- * // 注册常驻监听
  * const unsub = bus.on("login", this, (uid, name) => {
  *   console.log(uid, name);
  * });
- * // 取消监听
  * unsub();
  *
- * // 一次性监听
  * bus.once("logout", this, () => location.reload());
- *
- * // 组件销毁时批量解绑
  * bus.offAllByTarget(this);
  *
- * // 触发信号
  * bus.emit("login", 1001, "admin");
  * ```
  */
 export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[]>> {
-	/** 空操作函数，用于无操作返回 */
-	private static readonly NOOP = () => void 0;
-
-	/** 信号名 -> 对应监听器集合 */
+	/** 信号名 -> 监听器集合 */
 	private readonly signalMap = new Map<keyof T, Set<SignalData<any[]>>>();
 
 	/**
-	 * 内部统一注册监听逻辑
-	 *
+	 * 内部统一注册逻辑
 	 * @param signalKey 信号标识
 	 * @param target 绑定对象
 	 * @param cb 回调函数
 	 * @param once 是否一次性监听
-	 * @returns 取消订阅函数（幂等，多次调用无副作用）
-	 * @throws {TypeError} 当参数类型无效时抛出
+	 * @returns 取消订阅函数（幂等）
+	 * @throws {TypeError} 参数无效时抛出
 	 */
 	private bind<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void, once: boolean): () => void {
-		if (typeof signalKey !== "string" || !signalKey) {
-			throw new TypeError("[SignalEmitter] signalKey 必须为有效字符串key");
+		if (!(typeof signalKey !== "string" || signalKey == "")) {
+			throw new TypeError("[SignalEmitter] 回调 signalKey 必须为有效字符串");
 		}
 		if (typeof cb !== "function") {
-			throw new TypeError("[SignalEmitter] 监听回调 cb 必须为函数");
+			throw new TypeError("[SignalEmitter] 回调 cb 必须为函数");
 		}
-		if (typeof target !== "object" || !target) {
+		if (!target || typeof target !== "object") {
 			throw new TypeError("[SignalEmitter] target 必须为非 null 对象");
 		}
 		let listenerSet = this.signalMap.get(signalKey);
@@ -80,60 +68,39 @@ export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[
 			listenerSet = new Set();
 			this.signalMap.set(signalKey, listenerSet);
 		}
-		// 校验重复监听：同一 target + 同一 cb 不重复注册
-		const duplicate = Array.from(listenerSet).some(item => item.target === target && item.cb === cb);
-		if (duplicate) {
-			console.warn(`[SignalEmitter] 重复注册信号监听: ${String(signalKey)}，本次注册已忽略`);
-			return SignalEmitter.NOOP;
+		for (const item of listenerSet) {
+			if (item.target === target && item.cb === cb) {
+				console.warn(`[SignalEmitter] 重复注册信号监听: ${String(signalKey)}，已忽略`);
+				return () => {};
+			}
 		}
-
 		const listener: SignalData<T[K]> = { cb, target, once };
 		listenerSet.add(listener);
-
-		let isUnsubscribed = false;
+		let unsubscribed = false;
 		return () => {
-			if (isUnsubscribed) return;
-			isUnsubscribed = true;
+			if (unsubscribed) return;
+			unsubscribed = true;
 			this.off(signalKey, target, cb);
 		};
 	}
 
 	/**
 	 * 注册常驻监听
-	 *
 	 * @param signalKey 信号名称
 	 * @param target 绑定对象（用于批量解绑）
 	 * @param cb 回调函数
 	 * @returns 取消订阅函数
-	 *
-	 * @remarks
-	 * 存在多次回调函数绑定请勿使用箭头函数，否则会因引用变化导致无法去重。可能导致触发多次
-	 *
-	 * @example
-	 * ```typescript
-	 * const unsub = bus.on("login", this, (uid, name) => {
-	 *   console.log(`用户 ${name}(${uid}) 登录`);
-	 * });
-	 * ```
 	 */
 	public on<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void): () => void {
 		return this.bind(signalKey, target, cb, false);
 	}
 
 	/**
-	 * 注册一次性监听，触发一次后自动解绑
-	 *
+	 * 注册一次性监听
 	 * @param signalKey 信号名称
 	 * @param target 绑定对象
 	 * @param cb 回调函数
 	 * @returns 取消订阅函数
-	 *
-	 * @example
-	 * ```typescript
-	 * bus.once("logout", this, () => {
-	 *   console.log("用户已登出，仅执行一次");
-	 * });
-	 * ```
 	 */
 	public once<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void): () => void {
 		return this.bind(signalKey, target, cb, true);
@@ -141,18 +108,6 @@ export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[
 
 	/**
 	 * 移除指定信号下 `target + cb` 匹配的单个监听
-	 *
-	 * @param signalKey 信号名称
-	 * @param target 绑定对象
-	 * @param cb 注册时传入的回调函数
-	 *
-	 * @example
-	 * ```typescript
-	 * const handler = (uid, name) => { ... };
-	 * bus.on("login", this, handler);
-	 * // 移除
-	 * bus.off("login", this, handler);
-	 * ```
 	 */
 	public off<K extends keyof T>(signalKey: K, target: object, cb: (...args: T[K]) => void): void {
 		const listenerSet = this.signalMap.get(signalKey);
@@ -169,26 +124,19 @@ export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[
 	}
 
 	/**
-	 * 批量移除指定 target 对象绑定的所有信号监听
-	 *
-	 * @param target 绑定对象
-	 *
-	 * @example
-	 * ```typescript
-	 * // 组件卸载时清理所有监听
-	 * bus.offAllByTarget(this);
-	 * ```
+	 * 批量移除指定 target 对象绑定的所有监听
 	 */
 	public offAllByTarget(target: object): void {
-		const signalEntries = Array.from(this.signalMap.entries());
-		for (const [signalKey, listenerSet] of signalEntries) {
+		for (const [signalKey, listenerSet] of this.signalMap.entries()) {
 			const toRemove: SignalData<any[]>[] = [];
 			for (const item of listenerSet) {
 				if (item.target === target) {
 					toRemove.push(item);
 				}
 			}
-			toRemove.forEach(item => listenerSet.delete(item));
+			for (const item of toRemove) {
+				listenerSet.delete(item);
+			}
 			if (listenerSet.size === 0) {
 				this.signalMap.delete(signalKey);
 			}
@@ -196,28 +144,15 @@ export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[
 	}
 
 	/**
-	 * 触发信号，执行所有匹配监听回调
-	 *
+	 * 触发信号，执行所有匹配监听
 	 * @param signalKey 信号名称
-	 * @param args 信号携带参数
-	 *
-	 * @remarks
-	 * - 一次性监听在执行后会被自动移除。
-	 * - 任何回调执行异常都会被捕获并输出到控制台，不会中断其他监听。
-	 *
-	 * @example
-	 * ```typescript
-	 * bus.emit("login", 1001, "admin");
-	 * bus.emit("resize", 1920, 1080);
-	 * ```
+	 * @param args 参数
 	 */
 	public emit<K extends keyof T>(signalKey: K, ...args: T[K]): void {
 		const listenerSet = this.signalMap.get(signalKey);
-		if (!listenerSet?.size) return;
-
+		if (!listenerSet || listenerSet.size === 0) return;
 		const snapshot = Array.from(listenerSet);
 		const onceToRemove: SignalData<any[]>[] = [];
-
 		for (const item of snapshot) {
 			try {
 				item.cb(...args);
@@ -228,79 +163,93 @@ export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[
 				onceToRemove.push(item);
 			}
 		}
-
-		for (const item of onceToRemove) {
-			listenerSet.delete(item);
+		if (onceToRemove.length > 0) {
+			for (const item of onceToRemove) {
+				listenerSet.delete(item);
+			}
 		}
 		if (listenerSet.size === 0) {
 			this.signalMap.delete(signalKey);
 		}
 	}
 
-	/**
-	 * 判断指定信号是否存在监听
-	 *
-	 * @param signalKey 信号名称
-	 * @returns 是否存在至少一个监听
-	 *
-	 * @example
-	 * ```typescript
-	 * if (bus.has("login")) {
-	 *   console.log("有登录监听");
-	 * }
-	 * ```
-	 */
+	/** 判断指定信号是否存在监听 */
 	public has<K extends keyof T>(signalKey: K): boolean {
 		return (this.signalMap.get(signalKey)?.size ?? 0) > 0;
 	}
 
-	/**
-	 * 获取指定信号当前监听数量
-	 *
-	 * @param signalKey 信号名称
-	 * @returns 监听器个数
-	 *
-	 * @example
-	 * ```typescript
-	 * const count = bus.count("login");
-	 * console.log(`登录监听数量：${count}`);
-	 * ```
-	 */
+	/** 获取指定信号的监听数量 */
 	public count<K extends keyof T>(signalKey: K): number {
 		return this.signalMap.get(signalKey)?.size ?? 0;
 	}
 
 	/**
 	 * 清空监听
-	 *
-	 * @param signalKey 可选，传入信号名则仅清空该信号，不传则清空全部信号
-	 *
-	 * @example
-	 * ```typescript
-	 * bus.clear("login");    // 只清空 login
-	 * bus.clear();           // 清空所有
-	 * ```
+	 * @param signalKey 可选，不传则清空所有
 	 */
 	public clear(signalKey?: keyof T): void {
 		if (signalKey !== undefined) {
 			this.signalMap.delete(signalKey);
-			return;
+		} else {
+			this.signalMap.clear();
 		}
-		this.signalMap.clear();
 	}
 
-	/**
-	 * 实例销毁：清空所有监听，释放全部引用
-	 *
-	 * @example
-	 * ```typescript
-	 * bus.destroy();
-	 * ```
-	 */
+	/** 销毁实例，释放所有监听 */
 	public destroy(): void {
 		this.signalMap.clear();
 	}
 }
+
+/**
+ * 深度拷贝
+ * @param value 要拷贝的值
+ * @param seen 已访问对象集合（用于处理循环引用）
+ * @returns 完全独立的新值
+ */
+export function deepCopy<T>(tSource: T): T {
+	if (tSource === null || typeof tSource !== "object") {
+		return tSource;
+	}
+	if (Array.isArray(tSource)) {
+		const target: any[] = [];
+		for (let i = 0; i < tSource.length; i++) {
+			target[i] = deepCopy(tSource[i]);
+		}
+		return target as unknown as T;
+	}
+	const target: Record<string, any> = {};
+	for (const key in tSource) {
+		if (Object.prototype.hasOwnProperty.call(tSource, key)) {
+			target[key] = deepCopy(tSource[key]);
+		}
+	}
+	return target as T;
+}
+
+/**
+ * 深度比较两个值是否相等（支持循环引用）
+ * @param a 值A
+ * @param b 值B
+ * @param seen 已访问对象映射（用于循环引用检测）
+ * @returns 是否深度相等
+ */
+function deepEqual(a: any, b: any): boolean {
+	if (Object.is(a, b)) return true;
+	if (!a || !b) return !a && !b;
+	if (typeof a !== "object" || typeof b !== "object") return false;
+	if (a.constructor !== b.constructor) return false;
+	const keysA = Object.keys(a);
+	const keysB = Object.keys(b);
+	if (keysA.length !== keysB.length) return false;
+	for (const key of keysA) {
+		if (deepEqual(a[key], b[key])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /**
  * 响应式数据观察者
  *
@@ -332,149 +281,58 @@ export class SignalEmitter<T extends Record<string, any[]> = Record<string, any[
  * }, this);
  *
  * state.updateValueByKey('count', 10); // 触发 watch 和 watchAll
+ * state.setMultiple({ count: 66, user: { name: "King" } }); // 触发 watch 和 watchAll
  * ```
  */
 export class SignalObserver<T extends Record<string, any>> {
-	/** 内部真实数据（深拷贝存储） */
+	/** 内部真实数据 */
 	private _data: T;
-	/** 内部事件总线（私有，外部无法访问） */
-	private _emitter = new SignalEmitter<Record<string, any[]>>();
+	/** 内部事件总线 */
+	private readonly _emitter = new SignalEmitter<Record<string, any[]>>();
 
 	/**
-	 * 创建响应式数据实例
-	 *
-	 * @param initialData 初始数据对象，会被深拷贝存储
+	 * @param initialData 初始数据（会被深拷贝）
 	 */
 	constructor(initialData: T) {
-		this._data = this._deepCopy(initialData);
+		this._emitter = new SignalEmitter<Record<string, any[]>>();
+		this._data = deepCopy(initialData);
 	}
 
 	/**
-	 * 对象深拷贝（递归拷贝所有可枚举属性）
-	 *
-	 * @param tSource 要拷贝的源数据
-	 * @returns 完全独立的新对象
-	 * @internal
+	 * 获取指定属性的值（深拷贝副本） 拿到值后可以使用 deepCopy拷贝一份然后操作
+	 * null 代表该字段的数据可能没有没有
 	 */
-	private _deepCopy<T>(tSource: T): T {
-		if (tSource === null || typeof tSource !== "object") {
-			return tSource;
-		}
-		if (Array.isArray(tSource)) {
-			const target: any[] = [];
-			for (let i = 0; i < tSource.length; i++) {
-				target[i] = this._deepCopy(tSource[i]);
-			}
-			return target as unknown as T;
-		}
-		const target: Record<string, any> = {};
-		for (const key in tSource) {
-			if (Object.prototype.hasOwnProperty.call(tSource, key)) {
-				target[key] = this._deepCopy(tSource[key]);
-			}
-		}
-		return target as T;
+	public getValueByKey<K extends keyof T>(key: K): T[K] | null {
+		return Object.freeze(this._data[key]) || null;
 	}
 
 	/**
-	 * 深度比较两个值是否相等（支持对象/数组/Date/Map/Set/RegExp，最大递归深度10层）
-	 *
-	 * @param a 比较值 A
-	 * @param b 比较值 B
-	 * @param depth 当前递归深度（内部使用）
-	 * @returns 是否深度相等
-	 * @internal
-	 */
-	private _deepEqual(a: any, b: any, depth = 0): boolean {
-		const MAX_DEPTH = 10;
-		if (depth > MAX_DEPTH) return Object.is(a, b);
-		if (Object.is(a, b)) return true;
-		if (!a || !b) return !a && !b;
-		if (typeof a !== "object" || typeof b !== "object") return false;
-		if (a.constructor !== b.constructor) return false;
-		const keysA = Object.keys(a);
-		const keysB = Object.keys(b);
-		if (keysA.length !== keysB.length) return false;
-		for (const key of keysA) {
-			if (!this._deepEqual(a[key], b[key], depth + 1)) {
-				return false;
-			}
-		}
-		return true;
-	}
-
-	/**
-	 * 获取指定属性的值（返回深拷贝副本）
-	 *
-	 * @param key 属性名
-	 * @returns 对应值的深拷贝副本（只读）
-	 *
-	 * @example
-	 * ```typescript
-	 * const count = state.getValueByKey('count'); // 返回副本，修改不影响原数据
-	 * ```
-	 */
-	public getValueByKey<K extends keyof T>(key: K): T[K] {
-		return this.getAllData()[key];
-	}
-
-	/**
-	 * 获取完整数据（深拷贝并冻结）
-	 *
-	 * @returns 完整数据的深拷贝冻结副本，确保只读
-	 *
-	 * @example
-	 * ```typescript
-	 * const snapshot = state.getAllData();
-	 * // snapshot 为只读，任何修改都会在严格模式下报错
-	 * ```
+	 * 获取完整数据的深拷贝（冻结副本，确保只读）
 	 */
 	public getAllData(): T {
-		return Object.freeze(this._deepCopy(this._data));
+		return Object.freeze(deepCopy(this._data));
 	}
 
 	/**
-	 * 设置数据（始终更新，存在监听则触发事件）
-	 *
+	 * 更新指定属性的值
 	 * @param key 属性名
 	 * @param value 新值
-	 *
-	 * @remarks
-	 * - 存储前会对 `value` 进行深拷贝，确保内部数据不受外部影响。
-	 * - 仅当新值与旧值不相等（深度比较）时，才会触发 `changeKey_*` 和 `changeAll` 事件。
-	 * - 即使无监听，数据也会被更新。
-	 *
-	 * @example
-	 * ```typescript
-	 * state.updateValueByKey('count', 100);
-	 * ```
+	 * @remarks 只有值变化时才会触发事件
 	 */
 	public updateValueByKey<K extends keyof T>(key: K, value: T[K]): void {
 		const oldValue = this._data[key];
-		const newValue = this._deepCopy(value);
-		const isEqual = typeof newValue === "object" ? this._deepEqual(oldValue, newValue) : Object.is(oldValue, newValue);
-		if (isEqual) return;
+		const newValue = deepCopy(value);
+		if (deepEqual(oldValue, newValue)) {
+			return;
+		}
 		this._data[key] = newValue;
-
 		const eventKey = `changeKey_${String(key)}`;
-		// 仅在存在监听时触发，避免无谓的事件派发
-		if (this._emitter.has(eventKey)) {
-			this._emitter.emit(eventKey, newValue, oldValue, key);
-		}
-		if (this._emitter.has("changeAll")) {
-			this._emitter.emit("changeAll", this._deepCopy(this._data), newValue, oldValue, key);
-		}
+		this._emitter.emit(eventKey, newValue, oldValue, key);
+		this._emitter.emit("changeAll", this._data, newValue, oldValue, key);
 	}
 
 	/**
-	 * 批量设置数据
-	 *
-	 * @param data 部分数据对象，会依次调用 `updateValueByKey`
-	 *
-	 * @example
-	 * ```typescript
-	 * state.setMultiple({ count: 10, user: { name: 'Bob' } });
-	 * ```
+	 * 批量更新多个属性
 	 */
 	public setMultiple(data: Partial<T>): void {
 		for (const key in data) {
@@ -486,23 +344,10 @@ export class SignalObserver<T extends Record<string, any>> {
 
 	/**
 	 * 监听单个属性的变化
-	 *
-	 * @param key 要监听的属性名
-	 * @param callback 回调函数，参数为 `(newValue, oldValue, changedKey)`
-	 * @param target 回调中 `this` 的指向对象（用于后续批量解绑）
-	 * @returns 取消监听的函数（调用后该监听被移除）
-	 *
-	 * @remarks
-	 * 回调函数请勿使用箭头函数，否则会因引用变化导致无法正确移除。
-	 *
-	 * @example
-	 * ```typescript
-	 * const unlisten = state.watchByKey('count', (newVal, oldVal, key) => {
-	 *   console.log(`${key} changed: ${oldVal} -> ${newVal}`);
-	 * }, this);
-	 * // 取消监听
-	 * unlisten();
-	 * ```
+	 * @param key 属性名
+	 * @param callback 回调函数
+	 * @param target this 指向对象
+	 * @returns 取消监听函数
 	 */
 	public watchByKey<K extends keyof T>(
 		key: K,
@@ -514,20 +359,9 @@ export class SignalObserver<T extends Record<string, any>> {
 
 	/**
 	 * 监听所有属性的变化
-	 *
-	 * @param callback 回调函数，参数为 `(fullData, newValue, oldValue, changedKey)`
-	 * @param target 回调中 `this` 的指向对象
-	 * @returns 取消监听的函数
-	 *
-	 * @remarks
-	 * 回调函数请勿使用箭头函数。
-	 *
-	 * @example
-	 * ```typescript
-	 * state.watchAll((fullData, newVal, oldVal, key) => {
-	 *   console.log(`属性 ${key} 由 ${oldVal} 变为 ${newVal}，当前数据：`, fullData);
-	 * }, this);
-	 * ```
+	 * @param callback 回调函数
+	 * @param target this 指向对象
+	 * @returns 取消监听函数
 	 */
 	public watchAll(
 		callback: (fullData: T, newValue: any, oldValue: any, changedKey: keyof T) => void,
@@ -538,18 +372,6 @@ export class SignalObserver<T extends Record<string, any>> {
 
 	/**
 	 * 取消单个属性的监听
-	 *
-	 * @param key 属性名
-	 * @param callback 注册时传入的回调函数（必须是同一个函数引用）
-	 * @param target 注册时绑定的 `this` 对象（必须一致）
-	 *
-	 * @example
-	 * ```typescript
-	 * const handler = (newVal, oldVal, key) => { ... };
-	 * state.watchByKey('count', handler, this);
-	 * // 取消
-	 * state.unwatch('count', handler, this);
-	 * ```
 	 */
 	public unwatch<K extends keyof T>(
 		key: K,
@@ -560,50 +382,22 @@ export class SignalObserver<T extends Record<string, any>> {
 	}
 
 	/**
-	 * 批量取消指定 `target` 对象的所有监听（通常用于组件卸载时清理）
-	 *
-	 * @param target 注册时绑定的 `this` 对象
-	 *
-	 * @example
-	 * ```typescript
-	 * // 组件销毁时清理所有监听
-	 * state.unwatchAllByTarget(this);
-	 * ```
+	 * 批量取消指定 target 的所有监听
 	 */
 	public unwatchAllByTarget(target: object): void {
 		this._emitter.offAllByTarget(target);
 	}
 
-	/**
-	 * 清空所有监听（谨慎使用）
-	 *
-	 * @remarks
-	 * 会移除所有 `watch` 和 `watchAll` 注册的回调，且无法恢复。
-	 *
-	 * @example
-	 * ```typescript
-	 * state.clearAllWatchers();
-	 * ```
-	 */
+	/** 清空所有监听（谨慎使用） */
 	public clearAllWatchers(): void {
 		this._emitter.clear();
 	}
 
 	/**
-	 * 销毁实例，释放所有监听引用
-	 *
-	 * @remarks
-	 * 清空所有监听并释放内部数据引用（数据置为 `null`），便于垃圾回收。
-	 * 调用后该实例不再可用。
-	 *
-	 * @example
-	 * ```typescript
-	 * state.destroy();
-	 * ```
+	 * 销毁实例（释放所有监听和数据引用）
 	 */
 	public destroy(): void {
 		this._emitter.destroy();
-		// 释放数据引用，帮助 GC
-		(this as any)._data = null;
+		this._data = null as any;
 	}
 }
