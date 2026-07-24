@@ -1,0 +1,134 @@
+{
+	"buffer_font_size": 16,
+	"buffer_line_height": "standard",
+	"ui_font_size": 16,
+	"tab_size": 4,
+	"hard_tabs": true,
+	"preferred_line_length": 125,
+	"cursor_blink": true,
+
+	// ========== 滚动 & 高亮 ==========
+	"current_line_highlight": "all",
+	"scrollbar": { "show": "auto" },
+	"sticky_scroll": { "enabled": true },
+
+	// ========== 格式化 ==========
+	"formatter": "prettier",
+	"prettier": {
+		"arrowParens": "avoid",
+		"singleQuote": false,
+		"semi": true,
+	},
+	"format_on_save": "on",
+	"show_completions_on_input": true, // 输入时显示补全
+	"lsp_highlight_debounce": 75, // LSP 提示防抖延迟，ms
+	// ========== 🚀 智能导入（核心修复） ==========
+	"code_actions_on_format": {
+		"source.addMissingImports": true, // 保存时自动添加缺失导入
+		"source.organizeImports": true, // 顺便整理导入顺序
+	},
+
+	// ========== 自动保存 ==========
+	"autosave": {
+		"after_delay": { "milliseconds": 5000 }, // 改为 5 秒，更快触发，减少丢失风险
+	},
+	"git": {
+		"git_gutter": "tracked_files", // 文件左边显示 git gutter，修改黄色，新增绿色，删除红色等
+		"inline_blame": {
+			// 在聚焦行显示 git blame
+			"enabled": false, // 是否显示
+			"delay_ms": 2000, // 延迟显示
+			"show_commit_summary": true, // 显示摘要
+		},
+	},
+	"project_panel": {
+		"dock": "left", // 文件目录位置
+		"git_status": true, // git 状态
+		"indent_size": 20, // 缩进尺寸，像素为单位
+		"indent_guides": {
+			// 缩进线
+			"show": "always",
+		},
+		"scrollbar": {
+			"show": "auto", // 滚动条，
+		},
+	},
+
+	// ========== AI 与内联提示 ==========
+	"disable_ai": false,
+	"edit_predictions": { "provider": "zed" },
+	"inlay_hints": {
+		"enabled": true, // 改为 true，统一开关
+		"edit_debounce_ms": 700,
+	},
+	"base_keymap": "VSCode", // 键盘映射
+
+	// ========== 文件处理 ==========
+	"file_scan_exclusions": ["*.prefab", "*.meta"],
+	"allow_rewrap": "in_comments",
+	"auto_indent": "none",
+
+	// ========== 标签栏 ==========
+	"tabs": {
+		"file_icons": true,
+	},
+
+	// ========== 字体特性 ==========
+	"buffer_font_features": {
+		"calt": false,
+	},
+
+	// ========== 未使用代码淡化 ==========
+	"unnecessary_code_fade": 0.5,
+
+	// ========== LSP 配置（vtsls） ==========
+	"lsp": {
+		"vtsls": {
+			"settings": {
+				"vtsls": {
+					"autoImportSpecifier": {
+						"enable": true, // ✅ 已开启，保持
+					},
+				},
+				"typescript": {
+					"tsserver": {
+						"maxTsServerMemory": 10000,
+					},
+					"preferences": {
+						"includePackageJsonAutoImports": "auto",
+						"includeCompletionsForModuleExports": true,
+						"quotePreference": "single",
+						"importModuleSpecifierPreference": "relative",
+					},
+				},
+				"javascript": {
+					"tsserver": {
+						"maxTsServerMemory": 10000,
+					},
+					"preferences": {
+						"includePackageJsonAutoImports": "auto",
+						"includeCompletionsForModuleExports": true,
+						"quotePreference": "single",
+						"importModuleSpecifierPreference": "relative",
+					},
+				},
+			},
+		},
+	},
+
+	// ========== 语言绑定 ==========
+	"languages": {
+		"TypeScript": {
+			"language_servers": ["vtsls", "!typescript-language-server"],
+		},
+		"TSX": {
+			"language_servers": ["vtsls", "!typescript-language-server"],
+		},
+		"JavaScript": {
+			"language_servers": ["vtsls", "!typescript-language-server"],
+		},
+	},
+
+	// ========== 自动更新 ==========
+	"auto_update": true,
+}
